@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="zhaoqike@121.48.165.6:10086" uploadOnCheckin="717c2084-87ea-4ab1-ba33-5e017a5a3c2d" autoUploadExternalChanges="true">
+    <serverData>
+      <paths name="V100">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="zhaoqike@121.48.161.146:22 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="zhaoqike@121.48.165.6:10086">
+        <serverdata>
+          <mappings>
+            <mapping deploy="EE-GAN" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="zhaoqike@121.48.165.6:12315">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myUploadOnCheckinName" value="zhaoqike@121.48.165.6:10086" />
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>
