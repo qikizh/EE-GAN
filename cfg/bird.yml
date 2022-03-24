@@ -1,6 +1,6 @@
 CONFIG_NAME: 'bird'
 
-DATASET_NAME: 'birds'
+DATASET_NAME: 'bird'
 DATA_DIR: '../data/birds/'
 SAVE_DIR: '../data/SSA_GAN_OUT'
 GPU_ID: 0
