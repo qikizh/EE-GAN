@@ -2,10 +2,7 @@ from __future__ import print_function
 import multiprocessing
 
 import os
-import io
 import sys
-import time
-import errno
 import random
 import pprint
 import datetime
@@ -13,23 +10,18 @@ import dateutil.tz
 import argparse
 
 import torch
-import torchvision
 import torch.nn as nn
-import torch.optim as optim
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
-import torchvision.utils as vutils
 from tensorboardX import SummaryWriter
 import numpy as np
-from PIL import Image
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
-from miscc.utils import mkdir_p, rm_mkdir_p, save_text_results, save_img_results
+from miscc.utils import mkdir_p, save_text_results, save_img_results
 from miscc.config import cfg, cfg_from_file
-from miscc.losses import words_loss, sent_loss
+from miscc.DAMSM_losses import words_loss, sent_loss
 from sync_batchnorm import DataParallelWithCallback
 
 from datasets import TextDataset
@@ -48,9 +40,6 @@ def parse_args():
                         help='optional config file',
                         default='cfg/bird.yml', type=str)
     parser.add_argument('--gpu', dest='gpu_ids', type=str, default="0")
-    parser.add_argument('--batchSize', dest='batch_size', type=int, default=16)
-    # bird 200, flower 102, coco None
-    parser.add_argument('--class_nums', dest='class_nums', type=int, default=200)
     parser.add_argument('--output_dir', dest='output_dir',
                         help='the path to save models and images',
                         default='EE-GAN bird', type=str)
@@ -109,7 +98,6 @@ def prepare_class_labels(batch_size, class_num, class_ids, device):
         class_labels[i][idx - 1] = 1
     return class_labels
 
-
 class Trainer(object):
 
     def __init__(self, output_dir, args):
@@ -123,8 +111,8 @@ class Trainer(object):
 
         self.args = args
         self.debug = args.debug
-        self.disc_class = args.disc_class
-        self.class_nums = args.class_nums
+        self.disc_class = cfg.USE_CLASS
+        self.class_nums = cfg.CLASS_NUM
 
         self.batch_size = cfg.TRAIN.BATCH_SIZE
         self.max_attr_nums = cfg.TEXT.MAX_ATTR_NUM
@@ -141,20 +129,79 @@ class Trainer(object):
         self.start_epoch = 1
         self.max_epoch = cfg.TRAIN.MAX_EPOCH + 1
 
-        self.sent_emb, self.attrs_emb = self.prepare_sampling(self.dataloader)
+        self.sample_sent_emb, self.sample_attrs_emb = self.prepare_sampling(self.data_loader)
 
-        if not cfg.RESTORE:
-            writer_path = os.path.join(self.output_dir, 'writer')
-            rm_mkdir_p(writer_path)
-            self.writer = SummaryWriter(writer_path)
-        else:
-            writer_path = os.path.join(self.output_dir, 'writer_new')
-            rm_mkdir_p(writer_path)
-            self.writer = SummaryWriter(writer_path)
+        writer_path = os.path.join(self.output_dir, 'writer')
+        mkdir_p(writer_path, rm_exist=True)
+        self.writer = SummaryWriter(writer_path)
 
         self.iters_cnt = 0
         self.d_class_coe = 10
         self.g_class_coe = 10
+        self.DAMSM_coe = 0.05
+
+    def train(self):
+
+        batch_size = self.batch_size
+        device = self.device
+        class_nums = self.class_nums
+
+        real_labels, fake_labels, match_labels = prepare_labels(self.batch_size, self.device)
+        class_labels = None
+
+        # in debug mode, the tqdm
+        # for epoch in range(self.start_epoch, self.max_epoch):
+        for epoch in tqdm(range(self.start_epoch, self.max_epoch)):
+            data_iter = iter(self.data_loader)
+            #for iters in range(len(data_iter)):
+            for iters in tqdm(range(len(data_iter))):
+                data = data_iter.next()
+
+                imgs, caps, cap_lens, cls_ids, attrs, attr_nums, attrs_len, \
+                unpair_caps, unpair_cap_lens, unpair_cls_ids, keys = prepare_data(data, device)
+
+                # step 1. condition input preparation
+                with torch.no_grad():
+                    hidden = self.text_encoder.init_hidden(batch_size)
+                    words_emb, sent_emb = self.text_encoder(caps, cap_lens, hidden)
+                    words_emb, sent_emb = words_emb.detach(), sent_emb.detach()
+
+                    attrs_emb = list()
+                    for i in range(self.max_attr_nums):
+                        one_attr = attrs[:,i,:].squeeze(-1)
+                        one_attr_len = attrs_len[:, i].squeeze(-1)
+                        _, one_attr_emb = self.text_encoder(one_attr, one_attr_len, hidden)
+                        attrs_emb.append(one_attr_emb)
+                    attrs_emb = torch.stack(attrs_emb, dim=1)
+                    attrs_emb = attrs_emb.detach()
+
+                    _, unpair_sent_emb = self.text_encoder(unpair_caps, unpair_cap_lens, hidden)
+                    unpair_sent_emb = unpair_sent_emb.detach()
+
+                if self.disc_class:
+                    class_labels = prepare_class_labels(batch_size, class_nums, cls_ids, device)
+
+                noise = torch.randn(batch_size, 100)
+                noise = noise.to(device)
+
+                # step 2. generation
+                _, attn_attr_emb = self.attr_enhance(sent_emb, attrs_emb)
+                attn_attr_emb = self.attr_enhance.module.attr_merge(attn_attr_emb)
+                fake_imgs = self.netG(noise, sent_emb, attn_attr_emb)
+
+                # step 3. backward supervision
+                if iters % UPDATE_INTERVAL == 0:
+                    iter_rec = True
+                    self.iters_cnt += 1
+                else:
+                    iter_rec = False
+
+                self.d_update(imgs, fake_imgs, sent_emb, unpair_sent_emb, class_labels, iter_rec)
+                self.g_update(fake_imgs, sent_emb, words_emb, attn_attr_emb, cls_ids, batch_size, match_labels,
+                              cap_lens, class_labels, iter_rec)
+
+            self.save_images(epoch)
+            self.save_model(epoch)
 
     def load_networks(self, n_words, device):
         """
@@ -225,43 +272,20 @@ class Trainer(object):
 
         return data_loader, dataset.n_words, dataset.ixtoword
 
-    def prepare_sampling(self, dataloader):
+    def prepare_sampling(self, data_loader):
         """
         The fix text-image pair is provided during training
         """
-
-        # [real_imgs, caps, sorted_cap_lens,
-        # cls_ids, keys, wrong_caps, wrong_sorted_cap_lens, wrong_cls_ids]
-
-        [real_imgs, caps, cap_lens, cls_ids,
-         attrs, attr_nums, attrs_len,
-         unpair_caps, unpair_cap_lens, unpair_cls_ids,
-         keys] = prepare_data(next(iter(dataloader)), self.device)
+        [real_imgs, caps, cap_lens, _,
+         attrs, _, attrs_len, _, _, _, _] = prepare_data(next(iter(data_loader)), self.device)
 
         txt_save_path = os.path.join(self.image_dir, 'sampling_text.txt')
         save_text_results(caps, cap_lens, self.ixtoword, txt_save_path)
+        save_img_results(real_imgs,prefix='sample_image', image_dir=self.image_dir)
 
-
-
-
-        # save the fix sampling
-        save_text_results(texts, self.image_dir)
-        save_img_results(real_imgs[-1].cpu(), None, prefix1="sample_img", prefix2=None, image_dir=self.image_dir)
-
-        # save the used noise and embs
         with torch.no_grad():
             hidden = self.text_encoder.init_hidden(self.batch_size)
-            _, sent_emb = self.text_encoder(captions, cap_lens, hidden)
-
-            # attrs
-            # bs x 3 x 5
-            # attrs_hidden = self.text_encoder.init_hidden(self.batch_attr_nums)
-            # attrs = torch.reshape(attrs, (self.batch_attr_nums, -1))
-            # attrs_len = torch.reshape(attrs_len, (self.batch_attr_nums, -1)).squeeze(-1)
-            # _, attrs_emb = self.text_encoder(attrs, attrs_len, attrs_hidden)
-            # # at_bs x ntf
-            # attrs_emb = torch.reshape(attrs, (self.batch_size, self.max_attr_nums, -1))
-            # bs x 3 x ntf
+            _, sent_emb = self.text_encoder(caps, cap_lens, hidden)
 
             attrs_emb = list()
             for i in range(self.max_attr_nums):
@@ -269,96 +293,77 @@ class Trainer(object):
                 one_attr_len = attrs_len[:, i].squeeze(-1)
                 _, one_attr_emb = self.text_encoder(one_attr, one_attr_len, hidden)
                 attrs_emb.append(one_attr_emb)
-
             attrs_emb = torch.stack(attrs_emb, dim=1)
 
         return sent_emb, attrs_emb
 
-
-    @staticmethod
-    def prepare_labels(batch_size):
-        # Kai: real_labels and fake_labels have data type: torch.float32
-        # match_labels has data type: torch.int64
-        real_labels = Variable(torch.FloatTensor(batch_size).fill_(1))
-        fake_labels = Variable(torch.FloatTensor(batch_size).fill_(0))
-        match_labels = Variable(torch.LongTensor(range(batch_size)))
-        if cfg.CUDA:
-            real_labels = real_labels.cuda()
-            fake_labels = fake_labels.cuda()
-            match_labels = match_labels.cuda()
-        return real_labels, fake_labels, match_labels
-
-    def save_model(self, epoch, netG, netsD, attr_enhance):
+    def save_model(self, epoch):
         if epoch == 1 or (epoch >= cfg.TRAIN.WARMUP_EPOCHS and epoch % cfg.TRAIN.GSAVE_INTERVAL == 0):
-            torch.save(netG.state_dict(), '%s/netG_%d.pth' % (self.model_dir, epoch),
+            torch.save(self.netG.state_dict(), '%s/netG_%d.pth' % (self.model_dir, epoch),
                        _use_new_zipfile_serialization=False)
-            torch.save(attr_enhance.state_dict(), '%s/attr_enhance_%d.pth' % (self.model_dir, epoch),
+            torch.save(self.attr_enhance.state_dict(), '%s/attr_enhance_%d.pth' % (self.model_dir, epoch),
                        _use_new_zipfile_serialization=False)
             print('Save Gen model.')
 
         if epoch == 1 or (epoch >= cfg.TRAIN.WARMUP_EPOCHS and epoch % cfg.TRAIN.DSAVE_INTERVAL == 0):
-            for i in range(self.numsD):
-                torch.save(netsD[i].state_dict(), '%s/netD_%d.pth' % (self.model_dir, i))
+            for i in range(len(self.netsD)):
+                torch.save(self.netsD[i].state_dict(), '%s/netD_%d.pth' % (self.model_dir, i))
                 print('Save Dis model.')
 
-    def write_images(self, epoch):
-
+    def save_images(self, epoch):
         with torch.no_grad():
             noise = torch.randn(self.batch_size, 100)
             noise = noise.to(self.device)
 
-            sent_emb = self.sent_emb
-            attrs_emb = self.attrs_emb
-
-            _, attn_attr_emb = self.attr_enhance(sent_emb, attrs_emb)
+            _, attn_attr_emb = self.attr_enhance(self.sample_sent_emb, self.sample_attrs_emb)
             attn_attr_emb = self.attr_enhance.module.attr_merge(attn_attr_emb)
+            fake_imgs = self.netG(noise, self.sample_sent_emb, attn_attr_emb)
 
-            fake_imgs = self.netG(noise, sent_emb, attn_attr_emb)
+        # batch_imgs, prefix, image_dir
+        save_img_results(fake_imgs, prefix='epoch_%d' % epoch, image_dir=self.image_dir)
 
-        if isinstance(fake_imgs, list):
-            save_img_results(None, fake_imgs, None, "epoch_%d" % epoch, self.image_dir)
-        else:
-            save_img_results(fake_imgs.cpu(), None, "synthesize_%d_%d" % epoch, None, self.image_dir)
-
+    """
+    The following functions are used to calculate the loss metrics and achieve backward.    
+    """
     @staticmethod
     def d_loss(imgs, fake_imgs, sent_emb, wrong_sent_emb, netD):
 
         # real cond
         real_features = netD(imgs)
-        output = netD.module.COND_DNET(real_features, sent_emb)
-        errD_real = torch.nn.ReLU()(1.0 - output).mean()
+        real_out = netD.module.COND_DNET(real_features, sent_emb)
+        errD_real = torch.nn.ReLU()(1.0 - real_out).mean()
 
-        # wrong cond
-        output = netD.module.COND_DNET(real_features, wrong_sent_emb)
-        errD_mismatch = torch.nn.ReLU()(1.0 + output).mean()
+        # unpair cond
+        unpair_out = netD.module.COND_DNET(real_features, wrong_sent_emb)
+        errD_mismatch = torch.nn.ReLU()(1.0 + unpair_out).mean()
 
         # fake cond
         fake_features = netD(fake_imgs.detach())
-        output = netD.module.COND_DNET(fake_features, sent_emb)
-        errD_fake = torch.nn.ReLU()(1.0 + output).mean()
+        fake_out = netD.module.COND_DNET(fake_features, sent_emb)
+        errD_fake = torch.nn.ReLU()(1.0 + fake_out).mean()
 
         return errD_real, errD_fake, errD_mismatch
 
     @staticmethod
-    def d_loss_class(imgs, fake_imgs, sent_emb, wrong_sent_emb, class_labels, netD):
+    def d_loss_class(imgs, fake_imgs, sent_emb, unpair_sent_emb, class_labels, netD):
 
         # class loss only for 256 scale currently
-        # real cond
         real_feature = netD(imgs)
-        real_sent, real_class = netD.module.COND_DNET(real_feature, sent_emb)
-        errD_real = torch.nn.ReLU()(1.0 - real_sent).mean()
-        errD_real_class = F.binary_cross_entropy_with_logits(real_class, class_labels)
+
+        real_sent_out, real_class_out = netD.module.COND_DNET(real_feature, sent_emb)
+        errD_real = torch.nn.ReLU()(1.0 - real_sent_out).mean()
+        errD_real_class = F.binary_cross_entropy_with_logits(real_class_out, class_labels)
 
         # wrong cond
-        wrong_sent, wrong_class = netD.module.COND_DNET(real_feature, wrong_sent_emb)
-        errD_mismatch = torch.nn.ReLU()(1.0 + wrong_sent).mean()
-        errD_mismatch_class = F.binary_cross_entropy_with_logits(wrong_class, class_labels)
+        unpair_sent_out, unpair_class_out = netD.module.COND_DNET(real_feature, unpair_sent_emb)
+        errD_mismatch = torch.nn.ReLU()(1.0 + unpair_sent_out).mean()
+        errD_mismatch_class = F.binary_cross_entropy_with_logits(unpair_class_out, class_labels)
 
         # fake cond
         fake_features = netD(fake_imgs.detach())
-        fake_sent, fake_class = netD.module.COND_DNET(fake_features, sent_emb)
-        errD_fake = torch.nn.ReLU()(1.0 + fake_sent).mean()
-        errD_fake_class = F.binary_cross_entropy_with_logits(fake_class, class_labels)
+        fake_sent_out, fake_class_out = netD.module.COND_DNET(fake_features, sent_emb)
+        errD_fake = torch.nn.ReLU()(1.0 + fake_sent_out).mean()
+        errD_fake_class = F.binary_cross_entropy_with_logits(fake_class_out, class_labels)
 
         return errD_real, errD_fake, errD_mismatch, errD_real_class, errD_fake_class, errD_mismatch_class
 
@@ -417,97 +422,29 @@ class Trainer(object):
 
         # the part is considered later
         a_loss0, a_loss1 = sent_loss(cnn_code, attrs_emb, match_labels, class_ids, batch_size)
-        a_loss = (a_loss0 + a_loss1) * cfg.TRAIN.SMOOTH.LAMBDA * 0.25
+        a_loss = (a_loss0 + a_loss1) * cfg.TRAIN.SMOOTH.LAMBDA * 0.5
 
         return w_loss, s_loss, a_loss
 
-    def train(self):
-        batch_size = self.batch_size
-        device = self.device
-        class_nums = self.class_nums
+    def d_update(self, imgs, fake_imgs, sent_emb, unpair_sent_emb, class_labels, iter_rec):
 
-        real_labels, fake_labels, match_labels = prepare_labels(self.batch_size, self.device)
-        class_labels = None
-
-        #for epoch in range(self.start_epoch, self.max_epoch):
-        for epoch in tqdm(range(self.start_epoch, self.max_epoch)):
-            data_iter = iter(self.dataloader)
-            #for iters in range(len(data_iter)):
-            for iters in tqdm(range(len(data_iter))):
-                data = data_iter.next()
-                imgs, caps, cap_lens, attrs, attr_nums, attrs_len, cls_ids, keys, wrong_caps, \
-                wrong_cap_lens, wrong_cls_ids = prepare_data(data, device)
-
-                with torch.no_grad():
-                    hidden = self.text_encoder.init_hidden(batch_size)
-                    # words_embs: batch_size x nef x seq_len
-                    # sent_emb: batch_size x nef
-                    words_embs, sent_emb = self.text_encoder(caps, cap_lens, hidden)
-                    words_embs, sent_emb = words_embs.detach(), sent_emb.detach()
-
-                    # wrong_hidden = self.text_encoder.init_hidden(batch_size)
-                    # wrong_words_embs, wrong_sent_emb = self.text_encoder(wrong_caps, wrong_cap_lens, hidden)
-                    # wrong_words_embs, wrong_sent_emb = wrong_words_embs.detach(), wrong_sent_emb.detach()
-
-                    _, wrong_sent_emb = self.text_encoder(wrong_caps, wrong_cap_lens, hidden)
-                    wrong_sent_emb = wrong_sent_emb.detach()
-
-                    # extract the attribute embedding
-                    attrs_emb = list()
-                    for i in range(self.max_attr_nums):
-                        one_attr = attrs[:,i,:].squeeze(-1)
-                        one_attr_len = attrs_len[:, i].squeeze(-1)
-                        _, one_attr_emb = self.text_encoder(one_attr, one_attr_len, hidden)
-                        attrs_emb.append(one_attr_emb)
-                    attrs_emb = torch.stack(attrs_emb, dim=1)
-                    attrs_emb = attrs_emb.detach()
-
-                if self.disc_class:
-                    class_labels = prepare_class_labels(batch_size, class_nums, cls_ids, device)
-
-                noise = torch.randn(batch_size, 100)
-                noise = noise.to(device)
-
-                _, attn_attr_emb = self.attr_enhance(sent_emb, attrs_emb)
-                attn_attr_emb = self.attr_enhance.module.attr_merge(attn_attr_emb)
-                fake_imgs = self.netG(noise, sent_emb, attn_attr_emb)
-
-                # d_loss
-                if iters % UPDATE_INTERVAL == 0:
-                    iter_rec = True
-                    self.iters_cnt += 1
-                else:
-                    iter_rec = False
-
-                self.d_update(imgs, fake_imgs, sent_emb, wrong_sent_emb, class_labels, iter_rec)
-                self.g_update(fake_imgs, sent_emb, words_embs, attn_attr_emb, cls_ids, batch_size, match_labels,
-                              cap_lens, class_labels, iter_rec)
-
-            self.write_images(epoch)
-            self.save_model(epoch, self.netG, self.netsD, self.attr_enhance)
-
-            # print("step")
-
-    def d_update(self, imgs, fake_imgs, sent_emb, wrong_sent_emb, class_labels, iter_rec):
-
-        for i in range(self.numsD):
+        for i in range(len(self.netsD)):
             real_img, fake_img, netD, optimizerD = imgs[i], fake_imgs[i], self.netsD[i], self.optimizerDs[i]
             disc_class = self.disc_class and i == 2
             if disc_class:
-                errD_real, errD_fake, errD_mismatch, errD_real_class, errD_fake_class, errD_mismatch_class = \
-                    self.d_loss_class(real_img, fake_img, sent_emb, wrong_sent_emb, class_labels, netD)
-                d_loss = errD_real + (errD_fake + errD_mismatch) / 2.0 + \
-                         (errD_real_class + errD_fake_class + errD_mismatch_class) / 3.0 * self.d_class_coe
+                errD_real, errD_fake, errD_unpair, errD_real_class, errD_fake_class, errD_unpair_class = \
+                    self.d_loss_class(real_img, fake_img, sent_emb, unpair_sent_emb, class_labels, netD)
+                d_loss = errD_real + (errD_fake + errD_unpair) / 2.0 + \
+                         (errD_real_class + errD_fake_class + errD_unpair_class) / 3.0 * self.d_class_coe
             else:
-                errD_real, errD_fake, errD_mismatch = \
-                    self.d_loss(real_img, fake_img, sent_emb, wrong_sent_emb, netD)
-                d_loss = errD_real + (errD_fake + errD_mismatch) / 2.0
+                errD_real, errD_fake, errD_unpair = \
+                    self.d_loss(real_img, fake_img, sent_emb, unpair_sent_emb, netD)
+                d_loss = errD_real + (errD_fake + errD_unpair) / 2.0
 
             optimizerD.zero_grad()
             d_loss.backward()
             optimizerD.step()
 
-            # d_loss_gp
             d_loss_gp = self.MA_gradient_penalty(real_img, sent_emb, netD, disc_class)
             optimizerD.zero_grad()
             d_loss_gp.backward()
@@ -516,18 +453,18 @@ class Trainer(object):
             if iter_rec:
                 self.writer.add_scalar('errD_%d/real_sent' % i,  errD_real, self.iters_cnt)
                 self.writer.add_scalar('errD_%d/fake_sent' % i, errD_fake, self.iters_cnt)
-                self.writer.add_scalar('errD_%d/mismatch_sent' % i, errD_mismatch, self.iters_cnt)
+                self.writer.add_scalar('errD_%d/unpair_sent' % i, errD_unpair, self.iters_cnt)
                 self.writer.add_scalar('errD_%d/d_loss_gp' % i, d_loss_gp, self.iters_cnt)
                 if disc_class:
                     self.writer.add_scalar('errD_%d/real_class' % i, errD_real_class, self.iters_cnt)
                     self.writer.add_scalar('errD_%d/fake_class' % i, errD_fake_class, self.iters_cnt)
-                    self.writer.add_scalar('errD_%d/mismatch_class' % i, errD_mismatch_class, self.iters_cnt)
+                    self.writer.add_scalar('errD_%d/mismatch_class' % i, errD_unpair_class, self.iters_cnt)
 
     def g_update(self, fake_imgs, sent_emb, words_emb, attr_emb, class_ids, batch_size, match_labels, cap_lens,
                  class_labels, iter_rec):
 
         g_loss = torch.FloatTensor(1).fill_(0).to(self.device)
-        for i in range(self.numsD):
+        for i in range(len(self.netsD)):
             fake_img, netD = fake_imgs[i], self.netsD[i]
             disc_class = self.disc_class and i == 2
             if disc_class:
@@ -542,10 +479,10 @@ class Trainer(object):
                 if disc_class:
                     self.writer.add_scalar('errG/G_%d_fake_class' % i, errG_class, self.iters_cnt)
 
-        # if self.disc_DAMSM:
         w_loss, s_loss, a_loss = self.DAMSM_loss(fake_imgs[-1], sent_emb, words_emb, attr_emb, class_ids, batch_size,
                                                  match_labels, cap_lens, self.image_encoder)
-        g_loss += 0.05 * (s_loss + w_loss + a_loss)
+
+        g_loss += self.DAMSM_coe * (s_loss + w_loss + a_loss)
 
         if iter_rec:
             self.writer.add_scalar('errG/s_loss', s_loss, self.iters_cnt)

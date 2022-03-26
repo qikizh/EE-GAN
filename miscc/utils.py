@@ -19,22 +19,18 @@ import skimage.transform
 from miscc.config import cfg
 
 
-def save_img_results(batch_imgs, imgs_collection, prefix1, prefix2, image_dir, nrow=8):
+def save_img_results(batch_imgs, prefix, image_dir, nrow=8):
     """
-
+    parms: batch_imgs: bs x 3 x w x h
     """
-
-    if batch_imgs is not None:
-        vutils.save_image(imgs_tcpu, "%s/%s.png" % (image_dir, prefix1),
-                          scale_each=True, normalize=True, nrow=nrow)
-
-    if imgs_collection is not None:
-        for i in range(len(imgs_collection)):
-            # fake_img = fake_imgs[i][0:num]
-            fake_img = imgs_collection[i]
-            vutils.save_image(fake_img, "%s/%s_%d.png" % (image_dir, prefix2, i),
+    if isinstance(batch_imgs, list):
+        for ix in range(len(batch_imgs)):
+            fake_img = batch_imgs[ix]
+            vutils.save_image(fake_img, "%s/%s_%d.png" % (image_dir, prefix, ix),
                               scale_each=True, normalize=True, nrow=nrow)
-
+    else:
+        vutils.save_image(batch_imgs, "%s/%s.png" % (image_dir, prefix),
+                          scale_each=True, normalize=True, nrow=nrow)
 
 def save_text_results(captions, cap_lens, ixtoword, txt_save_path,
                       attrs=None, attrs_num=None, attrs_len=None):

@@ -13,10 +13,6 @@ cfg = __C
 __C.DATASET_NAME = 'bird'
 __C.CONFIG_NAME = ''
 __C.DATA_DIR = ''
-__C.SAVE_DIR = ''
-__C.GPU_ID = 0
-__C.CUDA = True
-__C.WORKERS = 6
 __C.RNN_TYPE = 'LSTM'   # 'GRU'
 
 __C.TREE = edict()
@@ -27,8 +23,9 @@ __C.TREE.BASE_SIZE = 64
 __C.TRAIN = edict()
 __C.TRAIN.USE_ATTR = True
 __C.TRAIN.USE_UNPAIR = True
+__C.TRAIN.USE_CLASS = True
+__C.TRAIN.CLASS_NUM = 200
 
-__C.TRAIN.FLAG = True
 __C.TRAIN.NET_E = ''
 __C.TRAIN.NET_G = ''
 __C.TRAIN.BATCH_SIZE = 64

@@ -13,9 +13,6 @@ import torch.nn as nn
 import numpy as np
 from miscc.config import cfg
 
-from GlobalAttention import func_attention
-
-
 # ##################Loss for matching text-image###################
 def cosine_similarity(x1, x2, dim=1, eps=1e-8):
     """Returns cosine similarity between x1 and x2, computed along dim.
@@ -25,47 +22,114 @@ def cosine_similarity(x1, x2, dim=1, eps=1e-8):
     w2 = torch.norm(x2, 2, dim)
     return (w12 / (w1 * w2).clamp(min=eps)).squeeze()
 
+def func_attention(query, context, gamma1):
+    """
+    query: batch x ndf x queryL
+    context: batch x ndf x ih x iw (sourceL=ihxiw)
+    mask: batch_size x sourceL
+    """
+    batch_size, queryL = query.size(0), query.size(2)
+    ih, iw = context.size(2), context.size(3)
+    sourceL = ih * iw
 
-def sent_loss(cnn_code, rnn_code, labels, class_ids,
-              batch_size, eps=1e-8):
-    # ### Mask mis-match samples  ###
-    # that come from the same class as the real sample ###
-    masks = []
-    if class_ids is not None:
-        for i in range(batch_size):
-            mask = class_ids == class_ids[i]
-            mask[i] = 0
-            masks.append(mask.view(1, -1))
-        # masks: batch_size x batch_size
-        masks = torch.cat(masks, dim=0)
-        if cfg.CUDA:
-            masks = masks.cuda()
+    # --> batch x sourceL x ndf
+    context = context.view(batch_size, -1, sourceL)
+    contextT = torch.transpose(context, 1, 2).contiguous()
 
-    # --> seq_len x batch_size x nef
-    if cnn_code.dim() == 2:
-        cnn_code = cnn_code.unsqueeze(0)
-        rnn_code = rnn_code.unsqueeze(0)
+    # Get attention
+    # (batch x sourceL x ndf)(batch x ndf x queryL)
+    # -->batch x sourceL x queryL
+    attn = torch.bmm(contextT, query)  # Eq. (7) in AttnGAN paper
+    # --> batch*sourceL x queryL
+    attn = attn.view(batch_size * sourceL, queryL)
+    attn = nn.Softmax()(attn)  # Eq. (8)
 
-    # cnn_code_norm / rnn_code_norm: seq_len x batch_size x 1
-    cnn_code_norm = torch.norm(cnn_code, 2, dim=2, keepdim=True)
-    rnn_code_norm = torch.norm(rnn_code, 2, dim=2, keepdim=True)
-    # scores* / norm*: seq_len x batch_size x batch_size
-    scores0 = torch.bmm(cnn_code, rnn_code.transpose(1, 2))
-    norm0 = torch.bmm(cnn_code_norm, rnn_code_norm.transpose(1, 2))
-    scores0 = scores0 / norm0.clamp(min=eps) * cfg.TRAIN.SMOOTH.GAMMA3
+    # --> batch x sourceL x queryL
+    attn = attn.view(batch_size, sourceL, queryL)
+    # --> batch*queryL x sourceL
+    attn = torch.transpose(attn, 1, 2).contiguous()
+    attn = attn.view(batch_size * queryL, sourceL)
+    #  Eq. (9)
+    attn = attn * gamma1
+    attn = nn.Softmax()(attn)
+    attn = attn.view(batch_size, queryL, sourceL)
+    # --> batch x sourceL x queryL
+    attnT = torch.transpose(attn, 1, 2).contiguous()
 
-    # --> batch_size x batch_size
-    scores0 = scores0.squeeze()
-    if class_ids is not None:
-        scores0.data.masked_fill_(masks, -float('inf'))
-    scores1 = scores0.transpose(0, 1)
-    if labels is not None:
-        loss0 = nn.CrossEntropyLoss()(scores0, labels)
-        loss1 = nn.CrossEntropyLoss()(scores1, labels)
-    else:
-        loss0, loss1 = None, None
-    return loss0, loss1
+    # (batch x ndf x sourceL)(batch x sourceL x queryL)
+    # --> batch x ndf x queryL
+    weightedContext = torch.bmm(context, attnT)
 
+    return weightedContext, attn.view(batch_size, -1, ih, iw)
+
+class GlobalAttentionGeneral(nn.Module):
+    def __init__(self, idf, cdf):
+        super(GlobalAttentionGeneral, self).__init__()
+        # self.conv_context = conv1x1(cdf, idf)
+        self.sm = nn.Softmax()
+        self.mask = None
+
+    def applyMask(self, mask):
+        self.mask = mask  # batch x sourceL
+
+    def forward(self, input, context_key, content_value):
+        """
+            input: batch x idf x ih x iw (queryL=ihxiw)
+            context: batch x cdf x sourceL
+        """
+        ih, iw = input.size(2), input.size(3)
+        queryL = ih * iw
+        batch_size, sourceL = context_key.size(0), context_key.size(2)
+
+        # --> batch x queryL x idf
+        target = input.view(batch_size, -1, queryL)
+        targetT = torch.transpose(target, 1, 2).contiguous()
+        # batch x cdf x sourceL --> batch x cdf x sourceL x 1
+        # sourceT = context.unsqueeze(3)
+        # --> batch x idf x sourceL
+        # sourceT = self.conv_context(sourceT).squeeze(3)
+        sourceT = context_key
+
+        # Get attention
+        # (batch x queryL x idf)(batch x idf x sourceL)
+        # -->batch x queryL x sourceL
+        attn = torch.bmm(targetT, sourceT)
+
+        text_weighted = None
+        # text_attn = torch.transpose(attn, 1, 2).contiguous() # batch x sourceL x queryL
+        # text_attn = text_attn.view(batch_size*sourceL, queryL)
+        # if self.mask is not None:
+        #     mask = self.mask.repeat(queryL, 1)
+        #     mask = mask.view(batch_size, queryL, sourceL)
+        #     mask = torch.transpose(mask, 1, 2).contiguous()
+        #     mask = mask.view(batch_size*sourceL, queryL)
+        #     text_attn.data.masked_fill_(mask.data, -float('inf'))
+        # text_attn = self.sm(text_attn)
+        # text_attn = text_attn.view(batch_size,sourceL, queryL)
+        # text_attn = torch.transpose(text_attn, 1, 2).contiguous() # batch x queryL x sourceL
+        # # (batch x idf x queryL) * (batch x queryL x sourceL) -> batch x idf x sourceL
+        # text_weighted = torch.bmm(target, text_attn)
+
+        # --> batch*queryL x sourceL
+        attn = attn.view(batch_size * queryL, sourceL)
+        if self.mask is not None:
+            # batch_size x sourceL --> batch_size*queryL x sourceL
+            mask = self.mask.repeat(queryL, 1)
+            attn.data.masked_fill_(mask.data, -float('inf'))
+        attn = self.sm(attn)  # Eq. (2)
+        # --> batch x queryL x sourceL
+        attn = attn.view(batch_size, queryL, sourceL)
+        # --> batch x sourceL x queryL
+        attn = torch.transpose(attn, 1, 2).contiguous()
+
+        # (batch x idf x sourceL)(batch x sourceL x queryL)
+        # --> batch x idf x queryL
+        weightedContext = torch.bmm(content_value, attn)  #
+        # weightedContext = torch.bmm(sourceT, attn)
+        weightedContext = weightedContext.view(batch_size, -1, ih, iw)
+        attn = attn.view(batch_size, -1, ih, iw)
+
+        return weightedContext, attn
 
 def sent_similarity(cnn_code, rnn_code, class_ids, batch_size, eps=1e-8):
     # ### Mask mis-match samples  ###
@@ -100,7 +164,6 @@ def sent_similarity(cnn_code, rnn_code, class_ids, batch_size, eps=1e-8):
         scores0.data.masked_fill_(masks, -float('inf'))
 
     return scores0
-
 
 def words_similarity(img_features, words_emb, cap_lens, class_ids, batch_size):
     """
@@ -167,9 +230,46 @@ def words_similarity(img_features, words_emb, cap_lens, class_ids, batch_size):
 
     return similarities, att_maps
 
+def sent_loss(cnn_code, rnn_code, labels, class_ids, batch_size, eps=1e-8):
+    # ### Mask mis-match samples  ###
+    # that come from the same class as the real sample ###
+    masks = []
+    if class_ids is not None:
+        for i in range(batch_size):
+            mask = class_ids == class_ids[i]
+            mask[i] = 0
+            masks.append(mask.view(1, -1))
+        # masks: batch_size x batch_size
+        masks = torch.cat(masks, dim=0)
+        if cfg.CUDA:
+            masks = masks.cuda()
 
-def words_loss(img_features, words_emb, labels,
-               cap_lens, class_ids, batch_size):
+    # --> seq_len x batch_size x nef
+    if cnn_code.dim() == 2:
+        cnn_code = cnn_code.unsqueeze(0)
+        rnn_code = rnn_code.unsqueeze(0)
+
+    # cnn_code_norm / rnn_code_norm: seq_len x batch_size x 1
+    cnn_code_norm = torch.norm(cnn_code, 2, dim=2, keepdim=True)
+    rnn_code_norm = torch.norm(rnn_code, 2, dim=2, keepdim=True)
+    # scores* / norm*: seq_len x batch_size x batch_size
+    scores0 = torch.bmm(cnn_code, rnn_code.transpose(1, 2))
+    norm0 = torch.bmm(cnn_code_norm, rnn_code_norm.transpose(1, 2))
+    scores0 = scores0 / norm0.clamp(min=eps) * cfg.TRAIN.SMOOTH.GAMMA3
+
+    # --> batch_size x batch_size
+    scores0 = scores0.squeeze()
+    if class_ids is not None:
+        scores0.data.masked_fill_(masks, -float('inf'))
+    scores1 = scores0.transpose(0, 1)
+    if labels is not None:
+        loss0 = nn.CrossEntropyLoss()(scores0, labels)
+        loss1 = nn.CrossEntropyLoss()(scores1, labels)
+    else:
+        loss0, loss1 = None, None
+    return loss0, loss1
+
+def words_loss(img_features, words_emb, labels, cap_lens, class_ids, batch_size):
     """
         words_emb(query): batch x nef x seq_len
         img_features(context): batch x nef x 17 x 17
@@ -241,73 +341,3 @@ def words_loss(img_features, words_emb, labels,
 
     return loss0, loss1, att_maps
 
-
-# ##################Loss for G and Ds##############################
-def discriminator_loss(netD, real_imgs, fake_imgs, conditions,
-                       real_labels, fake_labels):
-    # Forward
-    real_features = netD(real_imgs)
-    fake_features = netD(fake_imgs.detach())
-    # loss
-    #
-    cond_real_logits = netD.COND_DNET(real_features, conditions)
-    cond_real_errD = nn.BCELoss()(cond_real_logits, real_labels)
-    cond_fake_logits = netD.COND_DNET(fake_features, conditions)
-    cond_fake_errD = nn.BCELoss()(cond_fake_logits, fake_labels)
-    #
-    batch_size = real_features.size(0)
-    cond_wrong_logits = netD.COND_DNET(real_features[:(batch_size - 1)], conditions[1:batch_size])
-    cond_wrong_errD = nn.BCELoss()(cond_wrong_logits, fake_labels[1:batch_size])
-
-    if netD.UNCOND_DNET is not None:
-        real_logits = netD.UNCOND_DNET(real_features)
-        fake_logits = netD.UNCOND_DNET(fake_features)
-        real_errD = nn.BCELoss()(real_logits, real_labels)
-        fake_errD = nn.BCELoss()(fake_logits, fake_labels)
-        errD = ((real_errD + cond_real_errD) / 2. +
-                (fake_errD + cond_fake_errD + cond_wrong_errD) / 3.)
-    else:
-        errD = cond_real_errD + (cond_fake_errD + cond_wrong_errD) / 2.
-    return errD
-
-
-def DAMSM_loss(image_encoder, fake_imgs, real_labels,
-               words_embs, sent_emb, match_labels,
-               cap_lens, class_ids):
-    class_ids = torch.LongTensor(class_ids)
-    batch_size = real_labels.size(0)
-    # Forward
-
-    # words_features: batch_size x nef x 17 x 17
-    # sent_code: batch_size x nef
-    region_features, cnn_code = image_encoder(fake_imgs)
-    w_loss0, w_loss1, _ = words_loss(region_features, words_embs,
-                                     match_labels, cap_lens,
-                                     class_ids, batch_size)
-    w_loss = (w_loss0 + w_loss1) * \
-        cfg.TRAIN.SMOOTH.LAMBDA
-    # err_words = err_words + w_loss.data[0]
-
-    s_loss0, s_loss1 = sent_loss(cnn_code, sent_emb,
-                                 match_labels, class_ids, batch_size)
-    s_loss = (s_loss0 + s_loss1) * \
-        cfg.TRAIN.SMOOTH.LAMBDA
-    # err_sent = err_sent + s_loss.data[0]
-
-    DAMSM = w_loss + s_loss
-    return DAMSM
-
-
-##################################################################
-def KL_loss(mu, logvar):
-    # -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
-    KLD = torch.mean(KLD_element).mul_(-0.5)
-    return KLD
-
-
-def perceptual_loss(vgg_model, real_img, fake_img):
-    real_inc_feat = vgg_model(real_img)
-    fake_inc_feat = vgg_model(fake_img)
-    loss = nn.MSELoss(reduction='mean')(real_inc_feat, fake_inc_feat)
-    return loss

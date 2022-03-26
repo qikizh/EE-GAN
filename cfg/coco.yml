@@ -1,30 +1,28 @@
-CONFIG_NAME: 'coco'
-
+CONFIG_NAME: 'coco_basic'
 DATASET_NAME: 'coco'
 DATA_DIR: '../data/coco2014'
 GPU_ID: 0
 WORKERS: 1
 
-
-B_VALIDATION: True # True  # False
-loss: 'hinge'
-
 TREE:
-    BRANCH_NUM: 1
-    BASE_SIZE: 256
-
+    BRANCH_NUM: 3
+    BASE_SIZE: 64
 
 TRAIN:
-    NF: 64 # default 64
     BATCH_SIZE: 24
-    MAX_EPOCH: 120
-    NET_G: '' # when validation, put the path of the trained model here
-    WARMUP_EPOCHS: 0
+    MAX_EPOCH: 160
+    CLASS_NUM: 1 # coco
+    USE_CLASS: False
+    NET_G: ''
+    WARMUP_EPOCHS: 120
     GSAVE_INTERVAL: 5
     DSAVE_INTERVAL: 10
-
 
 TEXT:
     EMBEDDING_DIM: 256
     CAPTIONS_PER_IMAGE: 5
-    DAMSM_NAME: 'DAMSMencoders/coco/text_encoder100.pth'
+    DAMSM_NAME: ''
+
+GAN:
+    GF_DIM: 64
+    DF_DIM: 64
