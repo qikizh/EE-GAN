@@ -255,11 +255,157 @@ class Gen(nn.Module):
 
         return [img_64, img_128, img_256]
 
+"""
+The followings are designs of Discriminators
+"""
+
+class resD(nn.Module):
+    def __init__(self, fin, fout, downsample=True):
+        super().__init__()
+        self.downsample = downsample
+        self.learned_shortcut = (fin != fout)
+        self.conv_r = nn.Sequential(
+            nn.Conv2d(fin, fout, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(fout, fout, 3, 1, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.conv_s = nn.Conv2d(fin, fout, 1, stride=1, padding=0)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        return self.shortcut(x) + self.gamma * self.residual(x)
+
+    def shortcut(self, x):
+        if self.learned_shortcut:
+            x = self.conv_s(x)
+        if self.downsample:
+            return F.avg_pool2d(x, 2)
+        return x
+
+    def residual(self, x):
+        return self.conv_r(x)
+
+class DiscSent(nn.Module):
+    def __init__(self, ndf, nef):
+        super(DiscSent, self).__init__()
+        self.df_dim = ndf
+        self.ef_dim = nef
+
+        self.joint_conv = nn.Sequential(
+            nn.Conv2d(ndf + nef, ndf*2, 3, 1, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf*2, 1, 4, 1, 0, bias=False))
+
+    def forward(self, feat, cond):
+        cond = cond.view(-1, self.ef_dim, 1, 1)
+        cond = cond.repeat(1, 1, 4, 4)
+        h_c_code = torch.cat((feat, cond), 1)
+        out = self.joint_conv(h_c_code)
+        return out
+
+class DiscCond(nn.Module):
+    def __init__(self, ndf, nef, class_nums=200):
+        super(DiscCond, self).__init__()
+        self.ndf = ndf
+        self.nef = nef
+        self.class_nums = class_nums
+
+        self.joinConv = nn.Sequential(
+            nn.Conv2d(ndf + nef, ndf * 2, 3, 1, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True))
+
+        self.pair_node = nn.Conv2d(ndf * 2, 1, kernel_size=4, stride=4)
+        self.class_node = nn.Conv2d(ndf * 2, ndf * 2, kernel_size=4, stride=4)
+        self.class_linear = nn.Linear(ndf * 2, self.class_nums)
+
+    def forward(self, img_code, c_code):
+
+        # resize the condition
+        scale = img_code.size(-1)
+        c_code = c_code.view(-1, self.nef, 1, 1)
+        c_code = c_code.repeat(1, 1, scale, scale)
+
+        # merge the feature
+        joint_code = torch.cat((img_code, c_code), 1)
+        joint_code = self.joinConv(joint_code)
+
+        pair_disc_out = self.pair_node(joint_code).view(-1)
+        class_disc_out = self.class_node(joint_code).view(-1, self.ndf*2)
+        class_disc_out = self.class_linear(class_disc_out)
+
+        return pair_disc_out, class_disc_out
+
+class Dis64(nn.Module):
+    def __init__(self, ndf=cfg.GAN.DF_DIM):
+        super(Dis64, self).__init__()
+        self.conv_img = nn.Conv2d(3, ndf, 3, 1, 1)  # 64
+        self.block0 = resD(ndf * 1, ndf * 2)  # 32
+        self.block1 = resD(ndf * 2, ndf * 4)  # 16
+        self.block2 = resD(ndf * 4, ndf * 8)  # 8
+        self.block3 = resD(ndf * 8, ndf * 8)  # 4 x 4
+        self.COND_DNET = DiscSent(ndf * 8, 256)
+
+    def forward(self, x):
+        out = self.conv_img(x)
+        out = self.block0(out)
+        out = self.block1(out)
+        out = self.block2(out)
+        out = self.block3(out)
+        return out
+
+class Dis128(nn.Module):
+    def __init__(self, ndf=cfg.GAN.DF_DIM):
+        super(Dis128, self).__init__()
+        self.conv_img = nn.Conv2d(3, ndf, 3, 1, 1)  # 128
+        self.block0 = resD(ndf * 1, ndf * 2)  # 64
+        self.block1 = resD(ndf * 2, ndf * 4)  # 32
+        self.block2 = resD(ndf * 4, ndf * 8)  # 16
+        self.block3 = resD(ndf * 8, ndf * 8)  # 4
+        self.block4 = resD(ndf * 8, ndf * 16)  # 4
+        self.COND_DNET = DiscSent(ndf * 16, 256)
+
+    def forward(self, x):
+        out = self.conv_img(x)
+        out = self.block0(out)
+        out = self.block1(out)
+        out = self.block2(out)
+        out = self.block3(out)
+        out = self.block4(out)
+        return out
+
+class Dis256(nn.Module):
+    def __init__(self, ndf, disc_class, class_nums):
+        super(Dis256, self).__init__()
+        self.conv_img = nn.Conv2d(3, ndf, 3, 1, 1)  # 256
+        self.block0 = resD(ndf * 1, ndf * 2)  # 128
+        self.block1 = resD(ndf * 2, ndf * 4)  # 64
+        self.block2 = resD(ndf * 4, ndf * 8)  # 32
+        self.block3 = resD(ndf * 8, ndf * 16)  # 16
+        self.block4 = resD(ndf * 16, ndf * 16)  # 8
+        self.block5 = resD(ndf * 16, ndf * 16)  # 4
+        self.disc_class = disc_class
+
+        if disc_class:
+            self.COND_DNET = DiscCond(ndf * 16, 256, class_nums=class_nums)
+        else:
+            self.COND_DNET = DiscSent(ndf * 16, 256)
+
+    def forward(self, x):
+        out = self.conv_img(x)
+        out = self.block0(out)
+        out = self.block1(out)
+        out = self.block2(out)
+        out = self.block3(out)
+        out = self.block4(out)
+        out = self.block5(out)
+        return out
 
 if __name__ == '__main__':
+    # work
     from sync_batchnorm import DataParallelWithCallback
-
-    gen = Gen(cfg.GAN.GF_DIM, 100).to('cuda')
+    gen = Gen(64, 100).to('cuda')
     gen = DataParallelWithCallback(gen)
     whole_syn_path = '../data/SSA_GAN_OUT/1_2/multi_attr/Model/netG_760.pth'
     state_dict = torch.load(whole_syn_path, map_location=lambda storage, loc: storage)

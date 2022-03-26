@@ -23,7 +23,6 @@ __C.TREE = edict()
 __C.TREE.BRANCH_NUM = 3
 __C.TREE.BASE_SIZE = 64
 
-
 # Training options
 __C.TRAIN = edict()
 __C.TRAIN.USE_ATTR = True
@@ -53,8 +52,8 @@ __C.TRAIN.SMOOTH.LAMBDA = 1.0
 
 # Modal options
 __C.GAN = edict()
+__C.GAN.GF_DIM = 64
 __C.GAN.DF_DIM = 64
-__C.GAN.GF_DIM = 128
 __C.GAN.Z_DIM = 100
 __C.GAN.CONDITION_DIM = 100
 
