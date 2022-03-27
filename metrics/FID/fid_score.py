@@ -19,14 +19,12 @@ import numpy as np
 import torchvision.utils as vutils
 from inception import InceptionV3
 import torch.utils.data
-from PIL import Image
-from torch.utils import data
 import img_data as img_data
 import sys
 # dir_path = (os.path.abspath(os.path.join(os.path.realpath(__file__), './.')))
 # sys.path.append(dir_path)
 
-root_path = "/home/zhaoqike/SSA_GAN"
+root_path = "../../"
 sys.path.append(root_path)
 print(sys.path)
 
@@ -41,7 +39,7 @@ parser.add_argument('--dims', type=int, default=2048,
                     choices=list(InceptionV3.BLOCK_INDEX_BY_DIM),
                     help=('Dimensionality of Inception features to use. '
                           'By default, uses pool3 features'))
-parser.add_argument('-c', '--gpu', default='0', type=str,
+parser.add_argument('--gpu', default='0', type=str,
                     help='GPU to use (leave blank for CPU only)')
 parser.add_argument('--compared_path', type=str, default='../data/Models/IS_model/bird_val.npz',
                     help="compared image folder path")
@@ -52,27 +50,27 @@ class MeasureFID:
 
     def __init__(self, args):
 
-        self.repeat_times = 5
-        self.select_epoch = [epoch for epoch in range(550, 700, 10)]
-
         self.model_path = args.model_path
-        self.eval_image_folders = args.eval_image_folders
-        self.folders = self.prepare_folders()
+        self.compare_path = args.compare_path
+        self.gpu, self.dims, self.batch_size = args.gpu, args.dims, args.batch_size
 
-    def prepare_folders(self):
-        select_epoch = self.select_epoch
-        eval_image_folder = self.eval_image_folders
+    @staticmethod
+    def prepare_folders(eval_image_folder, select_epochs, repeat_times):
         re_image_folders = []
-        for epoch in select_epoch:
-            for re_ix in range(self.repeat_times):
+        for epoch in select_epochs:
+            for re_ix in range(repeat_times):
                 folder = os.path.join(eval_image_folder, "Epoch_%d_%d" % (epoch, re_ix))
                 re_image_folders.append(folder)
         return re_image_folders
 
-    def calculate_fid(self, compared_path, eval_image_paths, batch_size, cuda, dims):
+    def calculate_fid(self, eval_image_folders, select_epochs):
         """
         paras: the compared_path is from origin dataset
         """
+        cuda, dims, batch_size = self.gpu, self.dims, self.batch_size
+        compared_path = self.compare_path
+        eval_image_paths = self.prepare_folders(eval_image_folders, select_epochs)
+
         block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
         model = InceptionV3(self.model_path, [block_idx])
 
@@ -80,26 +78,24 @@ class MeasureFID:
             model.cuda()
 
         results = []
-        m1, s1 = self.compute_statistics_of_path(compared_path, model, batch_size, dims, cuda)
-
+        m1, s1 = self.calculate_statistic_one(compared_path, model, batch_size, dims, cuda)
 
         all_ts = 0
-        for cur_image_path in select_image_paths:
+        for cur_path in eval_image_paths:
             start_ts = time.time()
-            if not os.path.exists(cur_image_path):
-                raise RuntimeError('Invalid path: %s' % cur_image_path)
-            m2, s2 = _compute_statistics_of_path(cur_image_path, model, batch_size, dims, cuda)
-            fid_value = calculate_frechet_distance(m1, s1, m2, s2)
-            print(fid_value)
+            if not os.path.exists(cur_path):
+                raise RuntimeError('Invalid path: %s' % cur_path)
+            m2, s2 = self.calculate_statistic_one(cur_path, model, batch_size, dims, cuda)
+            fid_value = self.calculate_frechet_distance(m1, s1, m2, s2)
             results.append(fid_value)
             end_ts = time.time()
-            print('''%s is finished and costs time: %.2f\n''' % (cur_image_path, end_ts - start_ts))
             all_ts += (end_ts - start_ts)
+            print('''%s is finished and costs time: %.2f\n''' % (cur_path, end_ts - start_ts))
 
         print("the all cost time is %.2f" % all_ts)
         print(results)
 
-    def compute_statistics_of_path(self, given_path, model, batch_size, dims, cuda):
+    def calculate_statistic_one(self, given_path, model, batch_size, dims, cuda):
 
         if given_path.endswith('.npz'):
             f = np.load(given_path)
@@ -231,43 +227,38 @@ class MeasureFID:
         return (diff.dot(diff) + np.trace(sigma1) +
                 np.trace(sigma2) - 2 * tr_covmean)
 
-    """
-    The following functions is used to measure dataset's FID.
-    In this project, the flower.npy is evaluated by us, and bird.npy and coco.npy are provided by AttnGAN 
-    """
-
-    def gen_dataset_imgs(self, pickle_path, saving_dir, sampling_nums=30000, batch_size=48):
-        # we get 30K images saving in the saving_dir
-        # then to calculate the .npz file
-
+    @staticmethod
+    def gen_dataset_imgs(img_data_dir, filename_path, gen_saving_path, sampling_nums=30000, batch_size=48):
+        """
+        The following functions is used to measure dataset's FID.
+        In this project, the flower.npy is evaluated by us, and bird.npy and coco.npy are provided by AttnGAN.
+        Getting 30K images saving in the saving_dir, then to calculate the .npz file
+        """
         imsize = 299
         nWorks = 6
-        mkdir_p(saving_dir)
         image_transform = transforms.Compose([transforms.Resize(int(imsize * 76 / 64)),
                                               transforms.RandomCrop(imsize),
                                               transforms.RandomHorizontalFlip(),
                                               transforms.ToTensor()])
-
         # dataset = img_data.Dataset(path, transforms.Compose([
         #     transforms.Resize((299, 299)),
         #     transforms.ToTensor(),
         # ]))
 
-        dataset = img_data.Dataset(path=dir_path, pickle_path=pickle_path, transform=image_transform)
-
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
-                drop_last=True, shuffle=True, num_workers=nWorks)
+        dataset = img_data.Dataset(img_data_dir, filename_path, transform=image_transform)
+        dataloader = torch.utils.data.DataLoader(dataset,
+                               batch_size=batch_size, drop_last=True, shuffle=True, num_workers=nWorks)
 
         data_iter = iter(dataloader)
         len_data_iters = len(data_iter)
         img_cnt = 0
         continue_sampling = True
+        mkdir_p(gen_saving_path, rm_exist=True)
 
         while continue_sampling:
             data_iter = iter(dataloader)
-            for iters in tqdm(range(len_data_iters)):
+            for _ in tqdm(range(len_data_iters)):
                 data = data_iter.next()
-
                 for i in range(batch_size):
                     img_cnt += 1
                     if img_cnt >= sampling_nums:
@@ -275,58 +266,40 @@ class MeasureFID:
                         break
 
                     key = str(img_cnt)
-                    image_save_path = os.path.join(saving_dir, "%s.jpg" % key)
+                    image_save_path = os.path.join(gen_saving_path, "%s.jpg" % key)
                     vutils.save_image(data[i], image_save_path, scale_each=True, normalize=True)
 
+    def gen_npz_file(self, img_saving_path, npz_saving_path, batch_size, dims, cuda):
 
+        block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+        model = InceptionV3(self.model_path, [block_idx])
 
-def gen_npz_file(saving_path, model_path, select_image_path, cuda, dims, batch_size):
+        if cuda:
+            model.cuda()
 
-    block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
-    model = InceptionV3(model_path, [block_idx])
-    if cuda:
-        model.cuda()
+        mu, sigma = self.calculate_statistic_one(img_saving_path, model, batch_size, dims, cuda)
+        np.savez(npz_saving_path, mu=mu, sigma=sigma)
+        print("saving in %s" % npz_saving_path)
 
-    # path[0] is str that represents the dataset images
-    if not os.path.join(select_image_path):
-        raise RuntimeError('Invalid path: %s' % select_image_path)
+    def gen_flower_npz_file(self):
+        data_path = '../data/flowers'
 
-    mu, sigma = _compute_statistics_of_path(select_image_path, model, batch_size, dims, cuda)
-    np.savez(saving_path, mu=mu, sigma=sigma)
+        img_data_dir = os.path.join(data_path, 'images')
+        filename_path = os.path.join(data_path, 'test/filenames.pickle')
+        img_saving_dir = os.path.join(data_path, 'test/sampling_test_images')
+        npz_saving_dir = '../data/Models/IS_model/flower_val.npz'
 
-    if saving_path.endswith('.npz'):
-        f = np.load(saving_path)
-        m, s = f['mu'][:], f['sigma'][:]
-        f.close()
-
-    print("saving in %s" % saving_path)
-
-def gen_flower_fid(args):
-
-    dir_path = '../data/flowers'
-    pickle_path = os.path.join(dir_path, 'test/class_filenames.pickle')
-    img_saving_dir = os.path.join(dir_path, 'test/sampling_test_images')
-    npz_saving_dir = '../data/Models/IS_model/flower_val.npz'
-
-    # gen_dataset_imgs(dir_path, pickle_path, img_saving_dir)
-    gen_npz_file(npz_saving_dir, None, img_saving_dir, args.gpu, args.dims, args.batch_size)
-
-
+        self.gen_dataset_imgs(img_data_dir, filename_path, img_saving_dir)
+        self.gen_npz_file(img_saving_dir, npz_saving_dir, self.batch_size, self.dims, self.gpu)
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-    img_folders = prepare_folders()
-    print(img_folders)
+    measure = MeasureFID(args)
+    # measure.gen_flower_npz_file()
 
-
-    # Method 2.
-    # image_paths = []
-    # dirs = os.listdir(args.eval_image_folder)
-    # for file_name in dirs:
-    #     image_folder = os.path.join(args.eval_image_folder, file_name)
-    #     image_paths.append(image_folder)
-
-    calculate_fid_given_paths(None, args.compared_path, img_folders, args.batch_size, args.gpu, args.dims)
+    repeat_times = 5
+    select_epochs = [epoch for epoch in range(550, 700, 10)]
+    measure.calculate_fid(args.eval_image_folder, select_epochs)

@@ -4,6 +4,7 @@ import errno
 import shutil
 
 import numpy as np
+import pickle
 from torch.nn import init
 
 import torch
@@ -76,3 +77,28 @@ def mkdir_p(path, rm_exist=False):
             pass
         else:
             raise
+
+
+def get_filenames(data_path):
+    filenames = []
+    for path, subdirs, files in os.walk(data_path):
+        for name in files:
+            if name.rfind('jpg') != -1 or name.rfind('png') != -1:
+                filename = os.path.join(path, name)
+                if os.path.isfile(filename):
+                    filenames.append(filename)
+
+    print('Load filenames from: %s (%d)' % (data_path, len(filenames)))
+    return filenames
+
+def get_filenames_from_pickle(data_path, pickle_path):
+    with open(pickle_path, 'rb') as f:
+        filenames = pickle.load(f)
+
+    for ix in range(len(filenames)):
+        key = filenames[ix]
+        image_path = os.path.join(data_path, "%s.jpg" % key)
+        filenames[ix] = image_path
+
+    print('Load filenames from: %s (%d)' % (pickle_path, len(filenames)))
+    return filenames

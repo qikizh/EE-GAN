@@ -23,7 +23,7 @@ import time
 import imageio
 from PIL import Image
 
-from inception.slim import slim
+from .inception.slim import slim
 import numpy as np
 import tensorflow as tf
 import argparse
@@ -44,9 +44,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('checkpoint_dir', '../data/Models/inception_finetuned_models/birds_valid299/model.ckpt',
                            """Path where to read model checkpoints.""")
-tf.app.flags.DEFINE_string('image_folder', '../../data/SSA_OUT/12_2/base/Gen_Image/repeat_times_0',
+tf.app.flags.DEFINE_string('image_folder', '../../data/EE_GAN_OUT/12_2/base/Gen_Image/',
                            """Path where to load the images """)
-tf.app.flags.DEFINE_string('h5_file', '', """Path where to load the images """)
 tf.app.flags.DEFINE_integer('num_classes', 50,      # 20 for flowers
                             """Number of classes """)
 tf.app.flags.DEFINE_integer('splits', 10,
@@ -58,8 +57,6 @@ os.environ["CUDA_VISIBLE_DEVICES"] = FLAGS.gpu
 BATCHNORM_MOVING_AVERAGE_DECAY = 0.9997
 MOVING_AVERAGE_DECAY = 0.9999
 max_nums = 30000
-# fullpath = FLAGS.image_folder
-# print(fullpath)
 
 def preprocess(img):
     # print('img', img.shape, img.max(), img.min())
@@ -68,7 +65,6 @@ def preprocess(img):
         img = np.resize(img, (img.shape[0], img.shape[1], 3))
     img = scipy.misc.imresize(img, (299, 299, 3), interp='bilinear')
     img = img.astype(np.float32)
-    # [0, 255] --> [0, 2] --> [-1, 1]
     img = img / 127.5 - 1.
     # print('img', img.shape, img.max(), img.min())
     return np.expand_dims(img, 0)
@@ -125,9 +121,6 @@ def load_data(image_path):
         for name in files:
             if name.rfind('jpg') != -1 or name.rfind('png') != -1:
                 filename = os.path.join(path, name)
-                # print('filename', filename)
-                # print('path', path, '\nname', name)
-                # print('filename', filename)
                 if os.path.isfile(filename):
                     img = scipy.misc.imread(filename)
                     # img = imageio.imread(filename)
@@ -181,18 +174,6 @@ def inference(images, num_classes, for_training=False, restore_logits=True,
 
     return logits, auxiliary_logits
 
-# select_epoch = [300, 320, 340, 360, 380,
-#                 400, 420, 440, 460, 480,
-#                 500, 510, 520, 530, 540, 550, 560, 570, 580, 590,
-#                 600, 610, 620, 630, 640, 650, 660, 670, 680, 690,
-#                 700]
-# select_epoch = [600, 700]
-st, ed, interval = 600, 700, 10
-select_epoch = [epoch for epoch in range(st, ed+interval, interval)]
-# select_epoch = [600, 640]
-image_folder = FLAGS.image_folder
-repeat_times = 1
-
 def main(unused_argv=None):
     """Evaluate model on Dataset for a number of steps."""
     with tf.Graph().as_default():
@@ -207,53 +188,61 @@ def main(unused_argv=None):
 
                 # Build a Graph that computes the logits predictions from the
                 # inference model.
-                inputs = tf.placeholder( tf.float32, [FLAGS.batch_size, 299, 299, 3], name='inputs')
+                inputs = tf.placeholder(tf.float32, [FLAGS.batch_size, 299, 299, 3], name='inputs')
                 # print(inputs)
 
                 logits, _ = inference(inputs, num_classes)
                 # calculate softmax after remove 0 which reserve for BG
-                known_logits = \
-                    tf.slice(logits, [0, 1],
-                             [FLAGS.batch_size, num_classes - 1])
+                known_logits = tf.slice(logits, [0, 1], [FLAGS.batch_size, num_classes - 1])
                 pred_op = tf.nn.softmax(known_logits)
 
                 # Restore the moving average version of the
                 # learned variables for eval.
-                variable_averages = \
-                    tf.train.ExponentialMovingAverage(MOVING_AVERAGE_DECAY)
+                variable_averages = tf.train.ExponentialMovingAverage(MOVING_AVERAGE_DECAY)
                 variables_to_restore = variable_averages.variables_to_restore()
                 saver = tf.train.Saver(variables_to_restore)
                 saver.restore(sess, FLAGS.checkpoint_dir)
                 print('Restore the model from %s).' % FLAGS.checkpoint_dir)
-                # the following part could be reconstructed
-                mean_results = []
-                std_results = []
-                all_ts = 0
 
-                # mode 1.
-                print("The select epochs contain " + str(select_epoch))
-                for idx, epoch in enumerate(select_epoch):
-                    epoch_mean_results = []
-                    epoch_std_results = []
+                control_measuring(sess, pred_op)
 
-                    for re_ix in range(repeat_times):
-                        start_ts = time.time()
-                        cur_image_dir_path = os.path.join(image_folder, "Epoch_%d_%d" % (epoch, re_ix))
-                        print(cur_image_dir_path)
-                        images = load_data(cur_image_dir_path)
-                        mean_score, std_score = get_inception_score(sess, images, pred_op)
-                        epoch_mean_results.append(mean_score)
-                        epoch_std_results.append(std_score)
-                        end_ts = time.time()
-                        print('''Epoch_%d_%d model is finished and costs time: %.2f\n''' % (epoch, re_ix, end_ts - start_ts))
-                        all_ts += (end_ts - start_ts)
+def control_measuring(sess, pred_op):
+    """
+    We are not familiar with tf1, but in this .py we abstract the control function to achieve the user's purpose.
+    In other word, the user only need to prepare the tf1 environment, model files, and then modify this function.
+    """
+    image_folder = FLAGS.image_folder
 
-                    mean_results.append(epoch_mean_results)
-                    std_results.append(epoch_std_results)
+    st, ed, interval = 550, 700, 10
+    select_epoch = [epoch for epoch in range(st, ed + interval, interval)]
+    repeat_times = 5
+    mean_results = []
+    std_results = []
+    all_ts = 0
+    print("The select epochs contain " + str(select_epoch))
+    print("Each epoch concludes %d generation images" % repeat_times)
+    for idx, epoch in enumerate(select_epoch):
+        epoch_mean_results = []
+        epoch_std_results = []
 
-                print(mean_results)
-                print(std_results)
+        for re_ix in range(repeat_times):
+            start_ts = time.time()
+            cur_image_dir_path = os.path.join(image_folder, "Epoch_%d_%d" % (epoch, re_ix))
+            print(cur_image_dir_path)
+            images = load_data(cur_image_dir_path)
+            mean_score, std_score = get_inception_score(sess, images, pred_op)
+            epoch_mean_results.append(mean_score)
+            epoch_std_results.append(std_score)
+            end_ts = time.time()
+            print('''Epoch_%d_%d model is finished and costs time: %.2f\n''' % (epoch, re_ix, end_ts - start_ts))
+            print(mean_results, std_score)
+            all_ts += (end_ts - start_ts)
 
+        mean_results.append(epoch_mean_results)
+        std_results.append(epoch_std_results)
+
+    print(mean_results)
+    print(std_results)
 
 if __name__ == '__main__':
     tf.app.run()
