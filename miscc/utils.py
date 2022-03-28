@@ -5,20 +5,14 @@ import shutil
 
 import numpy as np
 import pickle
-from torch.nn import init
-
 import torch
-import torch.nn as nn
-import torchvision
-import torchvision.transforms as T
 import torchvision.utils as vutils
 
-from PIL import Image, ImageDraw, ImageFont
-from copy import deepcopy
-import skimage.transform
-
-from miscc.config import cfg
-
+def save_imgs_results_one_by_one(batch_imgs, prefix, image_dir):
+    # prefix: str of a list
+    for ix in range(len(batch_imgs)):
+        fake_img_path = '%s/fake_%s.jpg' % (image_dir, prefix[ix])
+        vutils.save_image(batch_imgs[ix], fake_img_path, scale_each=True, normalize=True)
 
 def save_img_results(batch_imgs, prefix, image_dir, nrow=8):
     """
@@ -91,6 +85,7 @@ def get_filenames(data_path):
     print('Load filenames from: %s (%d)' % (data_path, len(filenames)))
     return filenames
 
+
 def get_filenames_from_pickle(data_path, pickle_path):
     with open(pickle_path, 'rb') as f:
         filenames = pickle.load(f)
@@ -102,3 +97,26 @@ def get_filenames_from_pickle(data_path, pickle_path):
 
     print('Load filenames from: %s (%d)' % (pickle_path, len(filenames)))
     return filenames
+
+
+def calculate_r(scores):
+    ranks = torch.tensor(np.array([0, 0, 0]))
+    inx = torch.argsort(scores, dim=1, descending=True)
+    if 0 == inx[0]:
+        ranks += 1
+    elif 0 in inx[:5]:
+        ranks[1:] += 1
+    elif 0 in inx[:10]:
+        ranks[2:] += 1
+
+    return ranks
+
+
+    def save_imgs_one_by_one(self, fake_imgs, image_dir, keys):
+        for j in range(self.batch_size):
+            fake_img_path = '%s/fake_%s.jpg' % (image_dir, keys[j])
+            vutils.save_image(fake_imgs[j], fake_img_path, scale_each=True, normalize=True)
+
+    def save_imgs_batch(self, fake_imgs, step):
+        save_img_results(None, fake_imgs, None, "step_%d" % step, self.image_dir)
+
