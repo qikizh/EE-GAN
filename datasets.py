@@ -475,11 +475,9 @@ class TextOnlyDataset(data.Dataset):
             self.img_sum = self.__len__()
 
         self.use_attr = cfg.TRAIN.USE_ATTR
-        if attr_name != '':
+        if self.use_attr:
             self.attributes = TextDataset.load_attributes(data_dir, attr_name, split)
-            self.attach_attrs = True
-        else:
-            self.attach_attrs = False
+
 
     def image_regard_iter(self, img_ix):
         # random select an image
@@ -495,7 +493,7 @@ class TextOnlyDataset(data.Dataset):
         img_ix = sent_ix // self.embeddings_num
         key = self.filenames[img_ix]
         cls_id = self.class_id[img_ix]
-        rev_attrs = TextDataset.get_attributes(sent_ix, self.attributes) if self.use_attr else []
+        rev_attrs = self.get_attributes(sent_ix, self.attributes) if self.use_attr else []
 
         return [caps, cap_len, cls_id, key], rev_attrs
 
