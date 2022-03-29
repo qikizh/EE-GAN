@@ -2,25 +2,18 @@ from __future__ import print_function
 import multiprocessing
 
 import os
-import io
 import pickle
 import sys
-import time
-import errno
 import random
 import pprint
-import datetime
-import dateutil.tz
 import argparse
 
 import torch
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
-import torchvision.utils as vutils
 import numpy as np
 
-from nltk.tokenize import RegexpTokenizer
 from miscc.utils import mkdir_p, save_text_results, save_img_results, save_img_results_one_by_one
 from miscc.config import cfg, cfg_from_file
 from sync_batchnorm import DataParallelWithCallback
@@ -284,7 +277,7 @@ class Sampling(object):
             real_images, caps, cap_lens, attrs, attr_nums, attrs_len, keys = \
                 self.prepare_data_from_dataset(self.device)
 
-            real_prefix = ["real_%d" % idx for idx in range(self.batch_size)]
+            real_prefix = ["cap_%d" % idx for idx in range(self.batch_size)]
             real_save_dir = os.path.join(self.visual_dir, 'real_images')
             txt_save_path = os.path.join(self.visual_dir, 'dataset_example.txt')
 
@@ -307,34 +300,28 @@ class Sampling(object):
             print("error")
             return
 
-        batch = self.batch_size
-        noise = None
-
         # batch_data = caps, cap_lens, attrs, attrs_len
         with torch.no_grad():
             for cap_i in range(len(caps)):
-                save_dir = os.path.join(self.visual_dir, "cap_%d" % cap_i)
-                batch_caps = caps[cap_i].unsqueeze(0).repeat(self.noise_times, 1)
-                batch_cap_lens = cap_lens[cap_i].repeat(self.noise_times)
-                batch_attrs = attrs[cap_i].unsqueeze(0).repeat(self.noise_times, 1, 1)
-                batch_attrs_len = attrs_len[cap_i].unsqueeze(0).repeat(self.noise_times, 1)
+                batch_size = self.noise_times
+                batch_caps = caps[cap_i].unsqueeze(0).repeat(batch_size, 1)
+                batch_cap_lens = cap_lens[cap_i].repeat(batch_size)
+                batch_attrs = attrs[cap_i].unsqueeze(0).repeat(batch_size, 1, 1)
+                batch_attrs_len = attrs_len[cap_i].unsqueeze(0).repeat(batch_size, 1)
 
-                noise = torch.randn(self.batch_size, 100)
+                noise = torch.randn(batch_size, 100)
                 noise = noise.to(self.device)
 
-                gen_use_data = [batch_caps, batch_cap_lens, batch_attrs, batch_attrs_len, noise, self.noise_times]
+                gen_use_data = \
+                    [batch_caps, batch_cap_lens, batch_attrs, batch_attrs_len, noise, batch_size]
                 fake_imgs = self.gen_one_batch_attr(gen_use_data)
 
-                fake_prefix =
-
-                tmp_save_dir = os.path.join(save_dir, "sent_only")
-                keys = ["sent_only_%d" % n_i for n_i in range(self.noise_times)]
-                batch_key = "sent_only_batch"
+                save_dir = os.path.join(self.visual_dir, "cap_%d" % cap_i)
+                fake_prefix = ["sample_%d" % idx for idx in range(batch_size)]
 
                 img_256 = fake_imgs[-1]
-                self.save_imgs_one_by_one(img_256, tmp_save_dir, keys)
-                self.save_imgs_batch(img_256, tmp_save_dir, batch_key)
-                # self.gen_and_save(rev_data, tmp_save_dir, keys, batch_key)
+                save_img_results(img_256, "samples", save_dir)
+                save_img_results_one_by_one(img_256, fake_prefix, save_dir)
 
     def gen_one_batch_attr(self, gen_use_data):
 
