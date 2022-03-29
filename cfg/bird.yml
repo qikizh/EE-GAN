@@ -1,7 +1,7 @@
 CONFIG_NAME: 'bird_basic'
 DATASET_NAME: 'bird'
 DATA_DIR: '../data/birds/'
-SAVE_DIR: '../data/EE_GAN_OUT/train'
+SAVE_DIR: '../data/EE_GAN_OUT'
 WORKERS: 4
 
 TREE:

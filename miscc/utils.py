@@ -8,7 +8,7 @@ import pickle
 import torch
 import torchvision.utils as vutils
 
-def save_imgs_results_one_by_one(batch_imgs, prefix, image_dir):
+def save_img_results_one_by_one(batch_imgs, prefix, image_dir):
     # prefix: str of a list
     for ix in range(len(batch_imgs)):
         fake_img_path = '%s/fake_%s.jpg' % (image_dir, prefix[ix])
@@ -110,13 +110,4 @@ def calculate_r(scores):
         ranks[2:] += 1
 
     return ranks
-
-
-    def save_imgs_one_by_one(self, fake_imgs, image_dir, keys):
-        for j in range(self.batch_size):
-            fake_img_path = '%s/fake_%s.jpg' % (image_dir, keys[j])
-            vutils.save_image(fake_imgs[j], fake_img_path, scale_each=True, normalize=True)
-
-    def save_imgs_batch(self, fake_imgs, step):
-        save_img_results(None, fake_imgs, None, "step_%d" % step, self.image_dir)
 

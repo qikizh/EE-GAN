@@ -14,26 +14,17 @@ import dateutil.tz
 import argparse
 
 import torch
-import torchvision
-import torch.nn as nn
-import torch.optim as optim
-from nltk import RegexpTokenizer
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
-from tensorboardX import SummaryWriter
 import numpy as np
-from PIL import Image
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 
-import nltk
 from nltk.tokenize import RegexpTokenizer
-from nltk.tag import StanfordPOSTagger, PerceptronTagger
-from miscc.utils import mkdir_p, save_text_results, save_img_results
+from miscc.utils import mkdir_p, save_text_results, save_img_results, save_img_results_one_by_one
 from miscc.config import cfg, cfg_from_file
 from sync_batchnorm import DataParallelWithCallback
+from datasets import TextDataset as TextDataset
 from DAMSM import RNN_ENCODER
 from prepare_attributes import PrepareAttrs
 from models import Gen, ATTR_Enhance
@@ -49,10 +40,9 @@ def parse_args():
     parser.add_argument('--cfg', dest='cfg_file', help='optional config file',
                         default='cfg/sample_bird.yml', type=str)
     parser.add_argument('--gpu', dest='gpu_ids', type=str, default="0")
-    parser.add_argument('--debug', action="store_true", help='using debug mode')
     parser.add_argument('--manualSeed', type=int, default=3407, help='manual seed')
     # where to save
-    parser.add_argument('--output_dir', dest='output_dir', default='example', type=str)
+    parser.add_argument('--output_dir', default='example_bird', type=str)
     # sampling setting
     parser.add_argument('--from_code', action="store_true", help='samples from codes')
     parser.add_argument('--from_dataset', action="store_true", help='samples from datasets')
@@ -60,6 +50,10 @@ def parse_args():
     parser.add_argument('--split', dest='split', default='train', type=str)
     parser.add_argument('--txt_file', dest='txt_file', default='example.txt', type=str)
     parser.add_argument('--noise_times', dest='noise_times', type=int, default=1)
+    parser.add_argument('--taggar_file_path',
+    default='../nltk_data/stanford-postagger-full-2015-04-20/models/english-bidirectional-distsim.tagger', type=str)
+    parser.add_argument('--jar_file_path',
+    default='../nltk_data/stanford-postagger-full-2015-04-20/stanford-postagger-3.5.2.jar', type=str)
     args = parser.parse_args()
     return args
 
@@ -75,101 +69,25 @@ class Sampling(object):
         self.from_dataset = args.from_dataset
         self.from_code = args.from_code
         self.from_txt = args.from_txt
-
-        self.output_dir = output_dir
-
-        self.cap_file_path = os.path.join(output_dir, args.txt_file)
-        self.dataset_name = cfg.DATASET_NAME
-
-        if args.debug:
-            self.visual_dir = os.path.join(visual_dir, "debug")
-        else:
-            self.visual_dir = os.path.join(visual_dir, args.output_filename)
-        mkdir_p(self.visual_dir)
+        self.visual_dir = output_dir
+        self.cap_file_path = os.path.join(cfg.SAVE_DIR, args.txt_file)
+        mkdir_p(self.visual_dir, rm_exist=True)
 
         if self.from_dataset:
             self.dataloader, n_words, self.ixtoword, self.wordtoix = \
                 self.load_dataloader(args.debug, split=args.split)
         else:
-            n_words, self.ixtoword, self.wordtoix = self.load_text_info()
+            n_words, self.ixtoword, self.wordtoix = self.load_text_embedding()
 
-        self.netG, self.text_encoder, self.attr_enhance_enc, self.gen_one_batch \
-            = self.load_networks(n_words, self.attr_enhance, self.device)
+        self.netG, self.text_encoder, self.attr_enhance = self.load_networks(n_words, self.device)
 
         self.batch_size = args.batch_size
-        self.tokenizer, self.taggar, self.chunk_parsers, self.split_chunk_parsers = \
-            self.load_attr_func()
+        self.parser_func = PrepareAttrs.load_attr_parser(cfg.DATA_DIR, args.taggar_file_path, args.jar_file_path,
+                                                         args.taggar_mode)
 
-    """
-    synthesize images by model inference
-    """
-
-    def gen_one_batch_attr_ablation(self, gen_use_data, noise):
-
-        caps, cap_lens, attrs, attrs_len, batch_size = gen_use_data
-
-        hidden = self.text_encoder.init_hidden(batch_size)
-        _, sent_emb = self.text_encoder(caps, cap_lens, hidden)
-
-        if attrs is None:
-            # sent_emb --> bs x ctf
-            attrs_emb = sent_emb.unsqueeze(1).repeat(1, cfg.TEXT.MAX_ATTR_NUM, 1)
-            print("no attr")
-        else:
-            # extract the attribute embedding
-            attrs_emb = list()
-            for i in range(cfg.TEXT.MAX_ATTR_NUM):
-                one_attr = attrs[:, i, :].squeeze(-1)
-                one_attr_len = attrs_len[:, i].squeeze(-1)
-                _, one_attr_emb = self.text_encoder(one_attr, one_attr_len, hidden)
-                attrs_emb.append(one_attr_emb)
-            attrs_emb = torch.stack(attrs_emb, dim=1)
-            print("using attr")
-
-        attrs_emb = attrs_emb.detach()
-        _, attn_attr_emb = self.attr_enhance_enc(sent_emb, attrs_emb)
-        attn_attr_emb = self.attr_enhance_enc.module.attr_merge(attn_attr_emb)
-
-        fake_imgs = self.netG(noise, sent_emb, attn_attr_emb)
-        return fake_imgs
-
-    def gen_one_batch_attr(self, gen_use_data, device):
-
-        caps, cap_lens, attrs, attrs_len, batch_size = gen_use_data
-
-        hidden = self.text_encoder.init_hidden(batch_size)
-        _, sent_emb = self.text_encoder(caps, cap_lens, hidden)
-
-        # extract the attribute embedding
-        attrs_emb = list()
-        for i in range(cfg.TEXT.MAX_ATTR_NUM):
-            one_attr = attrs[:, i, :].squeeze(-1)
-            one_attr_len = attrs_len[:, i].squeeze(-1)
-            _, one_attr_emb = self.text_encoder(one_attr, one_attr_len, hidden)
-            attrs_emb.append(one_attr_emb)
-        attrs_emb = torch.stack(attrs_emb, dim=1)
-        attrs_emb = attrs_emb.detach()
-
-        _, attn_attr_emb = self.attr_enhance_enc(sent_emb, attrs_emb)
-        attn_attr_emb = self.attr_enhance_enc.module.attr_merge(attn_attr_emb)
-
-        noise = torch.randn(batch_size, 100)
-        noise = noise.to(device)
-        fake_imgs = self.netG(noise, sent_emb, attn_attr_emb)
-        return fake_imgs
-
-    def gen_one_batch_sent(self, gen_use_data, device):
-
-        caps, cap_lens, batch_size = gen_use_data
-        hidden = self.text_encoder.init_hidden(batch_size)
-        _, sent_emb = self.text_encoder(caps, cap_lens, hidden)
-        noise = torch.randn(batch_size, 100)
-        noise = noise.to(device)
-        fake_imgs = self.netG(noise, sent_emb)
-        return fake_imgs
-
-    def load_networks(self, n_words, device):
-
+    @staticmethod
+    def load_networks(n_words, device):
+        # netG
         model_dir = cfg.TRAIN.NET_G[:cfg.TRAIN.NET_G.rfind('/')]
         netG = Gen(cfg.TRAIN.GF, 100).to(device)
         netG = DataParallelWithCallback(netG)
@@ -177,47 +95,28 @@ class Sampling(object):
         netG.load_state_dict(torch.load(model_path))
         netG.eval()
 
+        # attribute enhancing
         st_idx = cfg.TRAIN.NET_G.rfind('_') + 1
         ed_idx = cfg.TRAIN.NET_G.rfind('.')
-            epoch = int(cfg.TRAIN.NET_G[st_idx:ed_idx])
-            model_path = os.path.join(model_dir, "attr_enhance_%d.pth" % epoch)
+        epoch = int(cfg.TRAIN.NET_G[st_idx:ed_idx])
+        model_path = os.path.join(model_dir, "attr_enhance_%d.pth" % epoch)
 
-            attr_enhance = ATTR_Enhance().to(device)
-            attr_enhance = torch.nn.DataParallel(attr_enhance)
-            attr_enhance.load_state_dict(torch.load(model_path))
-            attr_enhance.eval()
+        attr_enhance = ATTR_Enhance().to(device)
+        attr_enhance = torch.nn.DataParallel(attr_enhance)
+        attr_enhance.load_state_dict(torch.load(model_path))
+        attr_enhance.eval()
 
-            gen_one_batch = self.gen_one_batch_attr
-            print("using attr_enhance.")
-
-        else:
-            attr_enhance = None
-            gen_one_batch = self.gen_one_batch_sent
-
+        # text encoder
         text_encoder = RNN_ENCODER(n_words, nhidden=cfg.TEXT.EMBEDDING_DIM)
         state_dict = torch.load(cfg.TEXT.DAMSM_NAME, map_location=lambda storage, loc: storage)
         text_encoder.load_state_dict(state_dict)
         text_encoder.cuda()
         text_encoder.eval()
 
-        return netG, text_encoder, attr_enhance, gen_one_batch
+        return netG, text_encoder, attr_enhance
 
-
-    def load_attr_func(self):
-        tokenizer = RegexpTokenizer(r'\w+')
-
-        taggar = PrepareAttrs.load_taggar(taggar_mode='stanford')
-
-        if self.dataset_name == 'bird':
-            chunk_parsers, split_chunk_parsers = PrepareAttrs.define_cub_parser()
-        elif self.dataset_name == 'flower':
-            chunk_parsers, split_chunk_parsers = PrepareAttrs.define_oxford_parser()
-        else:
-            chunk_parsers, split_chunk_parsers = PrepareAttrs.define_coco_parser()
-
-        return tokenizer, taggar, chunk_parsers, split_chunk_parsers
-
-    def load_dataloader(self, debug, split='train'):
+    @staticmethod
+    def load_dataloader(debug, split='train'):
         imsize = cfg.TREE.BASE_SIZE * (2 ** (cfg.TREE.BRANCH_NUM-1))
         batch_size = cfg.TRAIN.BATCH_SIZE
         image_transform = transforms.Compose([
@@ -225,22 +124,11 @@ class Sampling(object):
             transforms.RandomCrop(imsize),
             transforms.RandomHorizontalFlip()])
 
-        # image_transform = transforms.Compose([
-        #     transforms.Resize(int(imsize))])
-
-        if self.dataset_name == 'bird':
-            from datasets import TextDataset as TextDataset
-        elif self.dataset_name == 'flower':
-            from dataset_flower import TextDataset as TextDataset
-        else:
-            from dataset_coco import TextDataset as TextDataset
-
-        dataset = TextDataset(cfg.DATA_DIR, split,
-                              base_size=cfg.TREE.BASE_SIZE,
-                              transform=image_transform, get_mismatch_pair=False)
+        dataset = TextDataset(cfg.DATA_DIR, dataset_name=cfg.DATASET_NAME, attr_name='EE-GAN',
+                              split=split, transform=image_transform)
 
         nWorks = 1 if debug else 4
-        print(dataset.n_words, dataset.embeddings_num)
+        print(dataset.n_words, dataset.embedding_num)
         assert dataset
         dataloader = torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, drop_last=True,
@@ -248,29 +136,23 @@ class Sampling(object):
 
         return dataloader, dataset.n_words, dataset.ixtoword, dataset.wordtoix
 
-    def load_text_info(self):
-
-        if self.dataset_name == 'bird':
-            filepath = os.path.join(cfg.DATA_DIR, "attn_captions.pickle")
-        else:
-            filepath = os.path.join(cfg.DATA_DIR, "captions.pickle")
-
+    @staticmethod
+    def load_text_embedding():
+        filepath = os.path.join(cfg.DATA_DIR, "captions.pickle")
         with open(filepath, 'rb') as f:
             x = pickle.load(f)
-            # train_captions, test_captions = x[0], x[1]
             ixtoword, wordtoix = x[2], x[3]
             del x
             n_words = len(ixtoword)
             print('Load from: ', filepath)
-
         return n_words, ixtoword, wordtoix
 
+    # using dataset to random sample
     def prepare_data_from_dataset(self, device):
 
         # only sample one batch in our setting
         data_iter = iter(self.dataloader)
         data = data_iter.next()
-
         rev_basic, rev_attrs, _ = data
         [imgs, caps, cap_lens, _, keys] = rev_basic
 
@@ -278,25 +160,22 @@ class Sampling(object):
         caps = caps.squeeze().to(device)
         cap_lens = Variable(cap_lens).to(device)
 
-        if self.attr_enhance:
-            [attrs, attr_nums, attrs_len] = rev_attrs
-            attrs = attrs.squeeze().to(device)
-            attrs_len = attrs_len.squeeze()
-        else:
-            attrs, attrs_len = None, None
+        [attrs, attr_nums, attrs_len] = rev_attrs
+        attrs = attrs.squeeze().to(device)
+        attrs_len = attrs_len.squeeze()
 
-        return real_imgs, caps, cap_lens, attrs, attrs_len, keys
+        return real_imgs, caps, cap_lens, attrs, attr_nums, attrs_len, keys
 
+    # using the content of .txt file
     def prepare_data_from_txt(self, device):
 
         cap_file_path = self.cap_file_path
-        caps_str, attrs_str = self.process_caps_from_row(cap_file_path)
+        caps_str, attrs_str = self.txt_to_str(cap_file_path)
 
         caps, cap_lens = self.transfer_cap_tokens(caps_str)
-        attrs, attrs_len = self.transfer_attr_tokens(attrs_str)
+        attrs, attrs_num, attrs_len = self.transfer_attr_tokens(attrs_str)
 
         # caps, cap_lens, attrs, attr_lens, rev_attrs
-
         caps = Variable(caps).to(device)
         cap_lens = Variable(cap_lens).to(device)
 
@@ -306,70 +185,51 @@ class Sampling(object):
         else:
             attrs, attrs_len = None, None
 
-        return caps, cap_lens, attrs, attrs_len, attrs_str
+        return caps, cap_lens, attrs, attrs_num, attrs_len, attrs_str
 
-    def defined_in_code(self):
-
-        # caps = \
-        #     ['this white bird has a dark blue beak, a looking grey underbelly, a dark blue collar and and black bars']
-
-        # caps = ['this blue bird has a dark blue beak, a looking grey underbelly, a dark blue collar and and black bars',
-        #         'this small has a grey brown crown with copper brown and white stripe primaries and secondaries',
-        #         'this is a bird with a white belly brown wing and breast and a red crown']
-
-        # blue bird, a dark blue beak, a looking grey underbelly, a dark blue collar, black bars
-
-        attrs = [
-            ['white bird'],
-            ['white bird', 'white bird', 'white bird'],
-            ['grey underbelly', 'grey underbelly', 'grey underbelly'],
-            ['black bars', 'black bars', 'black bars'],
-            ['blue collar', 'black bars'],
-
-            ['grey underbelly', 'dark blue collar'],
-            ['white bird', 'grey underbelly', 'dark blue collar'],
-
-            ['grey underbelly', 'dark blue collar', 'black bars']
-        ]
-
-        # given the row data and then organize them
-        for ix, cap in enumerate(caps):
-            cap = cap.replace("\ufffd\ufffd", " ")
-            cap = self.tokenizer.tokenize(cap.lower())
-            caps[ix] = cap
-
+    def txt_to_str(self, file_path):
+        rev_caps = []
         rev_attrs = []
-        for attr in attrs:
-            one_attr = []
-            for at in attr:
-                at = at.lower()
-                split_at = at.split(' ')
-                one_attr.append(split_at)
+        with open(file_path, "r") as f:
+            captions = f.read().split('\n')
+            for cap in captions:
+                if len(cap) == 0:
+                    continue
+                cap = cap.replace("\ufffd\ufffd", " ")
+                attrs = PrepareAttrs.do_parse_one_caption(self.parser_func, cap)
+                rev_caps.append(cap)
+                rev_attrs.append(attrs)
 
-            rev_attrs.append(one_attr)
+        return rev_caps, rev_attrs
 
-        caps = [caps[0] for _ in range(len(attrs))]
+    # using the content of code file
+    def prepare_data_from_code(self, device):
 
-        return caps, rev_attrs
+        captions = \
+            ['this blue bird has a dark blue beak, a looking grey underbelly, a dark blue collar and and black bars',
+                'this small has a grey brown crown with copper brown and white stripe primaries and secondaries',
+                'this is a bird with a white belly brown wing and breast and a red crown']
+        caps = []
+        attrs = []
 
-    def prepare_caps_from_code(self, device):
+        for cap in captions:
+            if len(cap) == 0:
+                continue
+            cap = cap.replace("\ufffd\ufffd", " ")
+            one_attr = PrepareAttrs.do_parse_one_caption(self.parser_func, cap)
+            caps.append(cap)
+            attrs.append(one_attr)
 
-        caps, attrs = self.defined_in_code()
-        caps, cap_lens = self.transfer_cap_tokens(caps)
-        attrs, attrs_len = self.transfer_attr_tokens(attrs)
+        caps_token, cap_lens = self.transfer_cap_tokens(caps)
+        attrs_token, attrs_num, attrs_len = self.transfer_attr_tokens(attrs)
 
-        # caps, cap_lens, attrs, attr_lens, rev_attrs
-
-        caps = Variable(caps).to(device)
+        caps_token = Variable(caps_token).to(device)
         cap_lens = Variable(cap_lens).to(device)
-        attrs = Variable(attrs).to(device)
+        attrs_token = Variable(attrs_token).to(device)
         attrs_len = Variable(attrs_len).to(device)
 
-        return caps, cap_lens, attrs, attrs_len
+        return caps_token, cap_lens, attrs_token, attrs_num, attrs_len, attrs
 
-    """
-    something complex
-    """
     def transfer_cap_tokens(self, captions):
         """
         captions: bs x str
@@ -397,9 +257,11 @@ class Sampling(object):
         rev_attr_tokens = torch.zeros((batch_size, cfg.TEXT.MAX_ATTR_NUM, cfg.TEXT.MAX_ATTR_LEN),
                             dtype=torch.int64)
         rev_attr_lens = torch.ones((batch_size, cfg.TEXT.MAX_ATTR_NUM), dtype=torch.int64)
+        rev_attr_nums = list()
 
         for ix, multi_attr in enumerate(attrs):
             a_nums = min(len(multi_attr), cfg.TEXT.MAX_ATTR_NUM)
+            rev_attr_nums.append(a_nums)
             for jx in range(a_nums):
                 attr = multi_attr[jx]
 
@@ -412,208 +274,90 @@ class Sampling(object):
                 rev_attr_tokens[ix][jx][:attr_len] = torch.tensor(attr_tokens)
                 rev_attr_lens[ix][jx] = torch.tensor(attr_len)
 
-        return rev_attr_tokens, rev_attr_lens
-
-    def process_caps_from_row(self, file_path):
-
-        rev_caps = []
-        rev_attrs = []
-
-        with open(file_path, "r") as f:
-            captions = f.read().split('\n')
-            for cap in captions:
-                if len(cap) == 0:
-                    continue
-
-                cap = cap.replace("\ufffd\ufffd", " ")
-                cap = self.tokenizer.tokenize(cap.lower())
-                # parse the attributes in the description
-                attrs = self.do_parse_one_caption(cap)
-
-                rev_caps.append(cap)
-                rev_attrs.append(attrs)
-
-        return rev_caps, rev_attrs
-
-    def do_parse_one_caption(self, cap):
-        """
-        tokenizer, chunk_parsers and split_chunk_parsers
-        """
-        if isinstance(cap, str):
-            tokens = self.tokenizer.tokenize(cap.lower())
-        else:
-            tokens = cap
-
-        tags = self.taggar.tag(tokens)
-        attr_set = set()
-
-        for chunk_parser in self.chunk_parsers:
-            tree = chunk_parser.parse(tags)
-            for subtree in tree.subtrees(filter=lambda t: t.label() == 'NP'):
-                myPhrase = []
-                for item in subtree.leaves():
-                    myPhrase.append(item[0])
-                tmp = " ".join(myPhrase)
-                attr_set.add(tmp)
-
-        if self.split_chunk_parsers is not None:
-            for chunk_parser in self.split_chunk_parsers:
-                tree = chunk_parser.parse(tags)
-                for subtree in tree.subtrees(filter=lambda t: t.label() == 'NP'):
-                    myPhrase = []
-                    for item in subtree.leaves():
-                        myPhrase.append(item[0])
-                    tmp = " ".join(myPhrase)
-                    attr_set.discard(tmp)
-
-        revs = []
-        for attr_str in attr_set:
-            tmp = attr_str.split(" ")
-            revs.append(tmp)
-
-        return revs
+        return rev_attr_tokens, rev_attr_nums, rev_attr_lens
 
     def main(self):
 
-        save_dir = self.visual_dir
-        batch = self.batch_size
-        noise = None
         if self.from_dataset:
-            print("dataset")
-            real_images, caps, cap_lens, attrs, attrs_len, keys = \
+            print("using data randomly from dataset")
+
+            real_images, caps, cap_lens, attrs, attr_nums, attrs_len, keys = \
                 self.prepare_data_from_dataset(self.device)
 
-            keys_real = ["real_%d" % idx for idx in range(batch)]
-            self.save_imgs_batch(real_images, save_dir, "origin", is_fake=False)
-            self.save_imgs_one_by_one(real_images, save_dir, keys_real, is_fake=False)
+            real_prefix = ["real_%d" % idx for idx in range(self.batch_size)]
+            real_save_dir = os.path.join(self.visual_dir, 'real_images')
+            txt_save_path = os.path.join(self.visual_dir, 'dataset_example.txt')
 
-            save_path = os.path.join(save_dir, "using_text.txt")
-            self.save_text_result_from_dataset(caps, cap_lens, attrs, attrs_len, save_path)
+            save_img_results_one_by_one(real_images, real_prefix, real_save_dir)
+            save_img_results(real_images, real_prefix, real_save_dir)
+            save_text_results(caps, cap_lens, self.ixtoword, txt_save_path, attrs, attr_nums, attrs_len)
 
         elif self.from_code:
+            print("using the content from defined code")
+            caps, cap_lens, attrs, attrs_num, attrs_len, attrs_str = self.prepare_data_from_code(self.device)
+            for ix in range(len(attrs_str)):
+                print("#%d" % ix + attrs_str[ix])
 
-            print("code")
-            caps, cap_lens, attrs, attrs_len = \
-                self.prepare_caps_from_code(self.device)
+        elif self.from_txt:
+            print("using the content from defined .txt file")
+            caps, cap_lens, attrs, attrs_num, attrs_len, attrs_str = self.prepare_data_from_txt(self.device)
+            for ix in range(len(attrs_str)):
+                print("#%d" % ix + attrs_str[ix])
+        else:
+            print("error")
+            return
 
-            with torch.no_grad():
+        batch = self.batch_size
+        noise = None
 
-                noise = torch.randn(self.noise_times, 100)
+        # batch_data = caps, cap_lens, attrs, attrs_len
+        with torch.no_grad():
+            for cap_i in range(len(caps)):
+                save_dir = os.path.join(self.visual_dir, "cap_%d" % cap_i)
+                batch_caps = caps[cap_i].unsqueeze(0).repeat(self.noise_times, 1)
+                batch_cap_lens = cap_lens[cap_i].repeat(self.noise_times)
+                batch_attrs = attrs[cap_i].unsqueeze(0).repeat(self.noise_times, 1, 1)
+                batch_attrs_len = attrs_len[cap_i].unsqueeze(0).repeat(self.noise_times, 1)
+
+                noise = torch.randn(self.batch_size, 100)
                 noise = noise.to(self.device)
 
-                tmp_cap = caps[0].unsqueeze(0).repeat(self.noise_times, 1)
-                tmp_cap_len = cap_lens[0].repeat(self.noise_times)
+                gen_use_data = [batch_caps, batch_cap_lens, batch_attrs, batch_attrs_len, noise, self.noise_times]
+                fake_imgs = self.gen_one_batch_attr(gen_use_data)
 
-                rev_data = [tmp_cap, tmp_cap_len, None, None, self.noise_times]
+                fake_prefix =
 
                 tmp_save_dir = os.path.join(save_dir, "sent_only")
                 keys = ["sent_only_%d" % n_i for n_i in range(self.noise_times)]
                 batch_key = "sent_only_batch"
 
-                # self.gen_and_save(rev_data, tmp_save_dir, keys, batch_key)
-                mkdir_p(tmp_save_dir)
-                fake_imgs = self.gen_one_batch_attr_ablation(rev_data, noise)
-                img_256 = fake_imgs[-1]
-                self.save_imgs_one_by_one(img_256, tmp_save_dir, keys)
-                self.save_imgs_batch(img_256, tmp_save_dir, batch_key)
-
-        else:
-            print("txt")
-            caps, cap_lens, attrs, attrs_len, attrs_str = \
-                self.prepare_data_from_txt(self.device)
-
-            for ix, ats in enumerate(attrs_str):
-                print("#%d" % ix)
-                print(ats)
-
-        # caps, cap_lens, attrs, attrs_len
-
-        with torch.no_grad():
-            for cap_i in range(len(caps)):
-                tmp_save_dir = os.path.join(save_dir, "cap_%d" % cap_i)
-
-                tmp_cap = caps[cap_i].unsqueeze(0).repeat(self.noise_times, 1)
-                tmp_cap_len = cap_lens[cap_i].repeat(self.noise_times)
-
-                if self.attr_enhance:
-                    tmp_attr = attrs[cap_i].unsqueeze(0).repeat(self.noise_times, 1, 1)
-                    tmp_attr_len = attrs_len[cap_i].unsqueeze(0).repeat(self.noise_times, 1)
-                    # caps, cap_lens, attrs, attrs_len, batch_size
-                    rev_data = [tmp_cap, tmp_cap_len, tmp_attr, tmp_attr_len, self.noise_times]
-                else:
-                    rev_data = [tmp_cap, tmp_cap_len, self.noise_times]
-
-                keys = ["cap_%d_%d" % (cap_i, n_i) for n_i in range(self.noise_times)]
-                batch_key = "cap_%d" % cap_i
-                mkdir_p(tmp_save_dir)
-
-                if self.from_code:
-                    fake_imgs = self.gen_one_batch_attr_ablation(rev_data, noise)
-                else:
-                    fake_imgs = self.gen_one_batch(rev_data, self.device)
-
                 img_256 = fake_imgs[-1]
                 self.save_imgs_one_by_one(img_256, tmp_save_dir, keys)
                 self.save_imgs_batch(img_256, tmp_save_dir, batch_key)
                 # self.gen_and_save(rev_data, tmp_save_dir, keys, batch_key)
 
+    def gen_one_batch_attr(self, gen_use_data):
 
-    def gen_and_save(self, rev_data, save_dir, keys, batch_key):
+        caps, cap_lens, attrs, attrs_len, noise, batch_size = gen_use_data
 
-        mkdir_p(save_dir)
-        fake_imgs = self.gen_one_batch(rev_data, self.device)
-        img_256 = fake_imgs[-1]
-        self.save_imgs_one_by_one(img_256, save_dir, keys)
-        self.save_imgs_batch(img_256, save_dir, batch_key)
+        hidden = self.text_encoder.init_hidden(batch_size)
+        _, sent_emb = self.text_encoder(caps, cap_lens, hidden)
 
-    """
-    saving results
-    """
-    def save_text_result_from_dataset(self, captions, cap_lens, attrs,
-                                      attrs_len, save_file_path):
-        texts = list()
-        for i in range(len(captions)):
-            # captions
-            cap = captions[i].data.cpu().numpy()
-            cap_len = cap_lens[i]
-            words = [self.ixtoword[cap[j]].encode('ascii', 'ignore').decode('ascii')
-                     for j in range(cap_len)]
+        # extract the attribute embedding
+        attrs_emb = list()
+        for i in range(cfg.TEXT.MAX_ATTR_NUM):
+            one_attr = attrs[:, i, :].squeeze(-1)
+            one_attr_len = attrs_len[:, i].squeeze(-1)
+            _, one_attr_emb = self.text_encoder(one_attr, one_attr_len, hidden)
+            attrs_emb.append(one_attr_emb)
+        attrs_emb = torch.stack(attrs_emb, dim=1)
+        attrs_emb = attrs_emb.detach()
 
-            sent_str = " ".join(words)
-            texts.append(sent_str)
+        _, attn_attr_emb = self.attr_enhance(sent_emb, attrs_emb)
+        attn_attr_emb = self.attr_enhance.module.attr_merge(attn_attr_emb)
+        fake_imgs = self.netG(noise, sent_emb, attn_attr_emb)
 
-            # attributes
-            # att_str = "# "
-            # att_num = len(attrs[i])
-            # # att_num = 0, 1, 2, 3
-            # for att_ix in range(att_num):
-            #     # a little confusion for this setting
-            #     att_len = attrs_len[i][att_ix]
-            #     att = attrs[i][att_ix].data.cpu().numpy()
-            #     words = [self.ixtoword[att[j]].encode('ascii', 'ignore').decode('ascii')
-            #              for j in range(att_len)]
-            #     att_str += " ".join(words) + ", "
-            #
-            # texts.append(att_str)
-            # texts.append("\n")
-
-        f = open(save_file_path, "w+")
-        for sent in texts:
-            f.write(sent + "\n")
-        f.close()
-
-    @staticmethod
-    def save_imgs_one_by_one(imgs, save_dir, keys, is_fake=True):
-        prefix = 'fake' if is_fake else 'real'
-        for i in range(len(imgs)):
-            img_path = os.path.join(save_dir, "%s_%s_single.jpg" % (prefix, keys[i]))
-            vutils.save_image(imgs[i], img_path, scale_each=True, normalize=True)
-
-    @staticmethod
-    def save_imgs_batch(imgs, save_dir, key, is_fake=True):
-        prefix = 'fake' if is_fake else 'real'
-        save_path = os.path.join(save_dir, "%s_%s_batch.jpg" % (prefix, key))
-        vutils.save_image(imgs, save_path, scale_each=True, normalize=True, nrow=8)
+        return fake_imgs[-1]
 
 
 if __name__ == "__main__":

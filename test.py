@@ -14,7 +14,7 @@ import numpy as np
 from tqdm import tqdm
 import re
 
-from miscc.utils import mkdir_p, save_imgs_results_one_by_one
+from miscc.utils import mkdir_p, save_img_results_one_by_one
 from miscc.config import cfg, cfg_from_file
 from sync_batchnorm import DataParallelWithCallback
 
@@ -269,7 +269,7 @@ class Tester(object):
                         R_cnt += batch_size
 
                     if self.saving_image:
-                        save_imgs_results_one_by_one(fake_imgs, prefix=keys, image_dir=cur_image_dir)
+                        save_img_results_one_by_one(fake_imgs, prefix=keys, image_dir=cur_image_dir)
 
                     iter_cnt += 1
                     if iter_cnt >= max_iter_nums:

@@ -47,11 +47,9 @@ class PrepareAttrs:
 
         self.dataset_name = args.dataset_name
         self.embeddings_num = 5 if self.dataset_name == 'coco' else 10
-        self.taggar_mode = args.taggar_mode
-
-        self.tokenizer = RegexpTokenizer(r'\w+')
-        self.chunk_parsers, self.split_chunk_parsers = self.define_parser(self.dataset_name)
-        self.taggar = self.load_taggar(args.taggar_file_path, args.jar_file_path, self.taggar_mode)
+        # self.tokenizer, self.taggar, self.chunk_parsers, self.split_chunk_parsers = \
+        self.parser_func = self.load_attr_parser(self.dataset_name, args.taggar_file_path, args.jar_file_path,
+                                                 args.taggar_mode)
 
         self.train_captions, self.test_captions, self.train_names, self.test_names, self.wordtoix, self.ixtoword = \
             self.load_text_embedding_info(args.data_dir, args.cap_filename)
@@ -69,25 +67,26 @@ class PrepareAttrs:
         return train_captions, test_captions, train_names, test_names, wordtoix, ixtoword
 
     @staticmethod
-    def load_taggar(taggar_file_path, jar_file_path, taggar_mode='stanford'):
+    def load_attr_parser(dataset_name, taggar_file_path, jar_file_path, taggar_mode='stanford'):
+
+        tokenizer = RegexpTokenizer(r'\w+')
+
         if taggar_mode == 'stanford':
-            rev_taggar = StanfordPOSTagger(taggar_file_path, jar_file_path)
+            taggar = StanfordPOSTagger(taggar_file_path, jar_file_path)
             print("using stanford nlp taggar")
         else:
-            # more simple
-            rev_taggar = PerceptronTagger()
+            # a simple implement to achieve taggar
+            taggar = PerceptronTagger()
 
-        return rev_taggar
-
-    def define_parser(self, dataset_name):
         if dataset_name == 'bird':
-            chunk_parsers, split_chunk_parsers = self.define_cub_parser()
+            chunk_parsers, split_chunk_parsers = PrepareAttrs.define_cub_parser()
         elif dataset_name == 'flower':
-            chunk_parsers, split_chunk_parsers = self.define_oxford_parser()
+            chunk_parsers, split_chunk_parsers = PrepareAttrs.define_oxford_parser()
         else:
-            chunk_parsers, split_chunk_parsers = self.define_coco_parser()
+            chunk_parsers, split_chunk_parsers = PrepareAttrs.define_coco_parser()
+
         print("conducting %s dataset" % dataset_name)
-        return chunk_parsers, split_chunk_parsers
+        return [tokenizer, taggar, chunk_parsers, split_chunk_parsers]
 
     @staticmethod
     def define_cub_parser():
@@ -211,19 +210,21 @@ class PrepareAttrs:
     main conduct the core task by using multi_thread_processing; 
     main_test could do a simple test for a few data.
     """
-    def do_parse_one_caption(self, cap):
+    @staticmethod
+    def do_parse_one_caption(parser_func, cap):
         """
         tokenizer, chunk_parsers and split_chunk_parsers
         """
+        [tokenizer, taggar, chunk_parsers, split_chunk_parsers] = parser_func
         if isinstance(cap, str):
-            tokens = self.tokenizer.tokenize(cap.lower())
+            tokens = tokenizer.tokenize(cap.lower())
         else:
             tokens = cap
 
-        tags = self.taggar.tag(tokens)
+        tags = taggar.tag(tokens)
         attr_set = set()
 
-        for chunk_parser in self.chunk_parsers:
+        for chunk_parser in chunk_parsers:
             tree = chunk_parser.parse(tags)
             for subtree in tree.subtrees(filter=lambda t: t.label() == 'NP'):
                 myPhrase = []
@@ -232,8 +233,8 @@ class PrepareAttrs:
                 tmp = " ".join(myPhrase)
                 attr_set.add(tmp)
 
-        if self.split_chunk_parsers is not None:
-            for chunk_parser in self.split_chunk_parsers:
+        if split_chunk_parsers is not None:
+            for chunk_parser in split_chunk_parsers:
                 tree = chunk_parser.parse(tags)
                 for subtree in tree.subtrees(filter=lambda t: t.label() == 'NP'):
                     myPhrase = []
@@ -256,7 +257,7 @@ class PrepareAttrs:
         all_attr_tokens = []
         for i in tqdm(range(len(cap_tokens))):
             cap = [ixtoword[token_ix] for token_ix in cap_tokens[i]]
-            attrs = self.do_parse_one_caption(cap)
+            attrs = self.do_parse_one_caption(self.parser_func, cap)
             attrs_tokens = list()
 
             for attr in attrs:

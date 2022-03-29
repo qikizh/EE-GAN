@@ -19,21 +19,13 @@ from __future__ import division
 from __future__ import print_function
 
 import time
-
-import imageio
-from PIL import Image
-
 from .inception.slim import slim
 import numpy as np
 import tensorflow as tf
-import argparse
-
 import math
 import os.path
 import scipy.misc
-# import time
-# import scipy.io as sio
-# from datetime import datetime
+
 import sys
 if sys.version_info[0] == 2:
     import cPickle as pickle
