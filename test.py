@@ -145,14 +145,14 @@ class Tester(object):
         attr_enhance.eval()
 
         # get the prefix of models
-        whole_syn_path = cfg.TRAIN.NET_G
-        model_dir = whole_syn_path[:whole_syn_path.rfind('/')]
-        whole_syn_prefix = os.path.join(model_dir, "netG_")
+        netG_path = cfg.TRAIN.NET_G
+        model_dir = netG_path[:netG_path.rfind('/')]
+        netG_prefix = os.path.join(model_dir, "netG_")
         attr_enhance_prefix = os.path.join(model_dir, "attr_enhance_")
 
         gen_one_batch = self.gen_one_batch_attr
 
-        return netG, attr_enhance, text_encoder, whole_syn_prefix, attr_enhance_prefix, gen_one_batch
+        return netG, attr_enhance, text_encoder, netG_prefix, attr_enhance_prefix, gen_one_batch
 
     def load_sim_network(self, n_words, device):
 

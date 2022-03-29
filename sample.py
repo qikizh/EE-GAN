@@ -36,12 +36,7 @@ from miscc.config import cfg, cfg_from_file
 from sync_batchnorm import DataParallelWithCallback
 from DAMSM import RNN_ENCODER
 from prepare_attributes import PrepareAttrs
-from model_attr import WholeStage_ATTR as NetG, ATTR_Enhance
-
-#from model_attr import ATTR_Enhance
-#from model_ppan import WholeStage_SSA as NetG
-
-import shutil
+from models import Gen, ATTR_Enhance
 
 dir_path = (os.path.abspath(os.path.join(os.path.realpath(__file__), './.')))
 sys.path.append(dir_path)
@@ -49,47 +44,41 @@ sys.path.append(dir_path)
 multiprocessing.set_start_method('spawn', True)
 UPDATE_INTERVAL = 200
 
-def mk_del_dir(path, del_dir=False):
-    if del_dir and os.path.exists(path):
-        shutil.rmtree(path)
-    os.makedirs(path)
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a DAMSM network')
-    parser.add_argument('--cfg', dest='cfg_file',
-                        help='optional config file',
-                        default='cfg/eval_attr_bird.yml', type=str)
+    parser.add_argument('--cfg', dest='cfg_file', help='optional config file',
+                        default='cfg/sample_bird.yml', type=str)
     parser.add_argument('--gpu', dest='gpu_ids', type=str, default="0")
-    parser.add_argument('--batchSize', dest='batch_size', type=int, default=24, help='batch size')
-    parser.add_argument('--output_filename', dest='output_filename',
-                        help='the path to save models and images',
-                        default='example', type=str)
     parser.add_argument('--debug', action="store_true", help='using debug mode')
-    parser.add_argument('--manualSeed', type=int, help='manual seed')
-    parser.add_argument('--attr_enhance', action='store_true')
-
+    parser.add_argument('--manualSeed', type=int, default=3407, help='manual seed')
+    # where to save
+    parser.add_argument('--output_dir', dest='output_dir', default='example', type=str)
     # sampling setting
     parser.add_argument('--from_code', action="store_true", help='samples from codes')
     parser.add_argument('--from_dataset', action="store_true", help='samples from datasets')
+    parser.add_argument('--from_txt', action="store_true", help='samples from txt')
     parser.add_argument('--split', dest='split', default='train', type=str)
     parser.add_argument('--txt_file', dest='txt_file', default='example.txt', type=str)
     parser.add_argument('--noise_times', dest='noise_times', type=int, default=1)
     args = parser.parse_args()
     return args
 
-
 class Sampling(object):
 
-    def __init__(self, visual_dir, args):
+    def __init__(self, output_dir, args):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.batch_size = cfg.TRAIN.BATCH_SIZE
+
         self.args = args
         self.noise_times = args.noise_times
-        self.batch_size = cfg.TRAIN.BATCH_SIZE
-        self.attr_enhance = args.attr_enhance
         self.from_dataset = args.from_dataset
         self.from_code = args.from_code
-        self.cap_file_path = os.path.join(visual_dir, args.txt_file)
+        self.from_txt = args.from_txt
+
+        self.output_dir = output_dir
+
+        self.cap_file_path = os.path.join(output_dir, args.txt_file)
         self.dataset_name = cfg.DATASET_NAME
 
         if args.debug:
@@ -179,18 +168,17 @@ class Sampling(object):
         fake_imgs = self.netG(noise, sent_emb)
         return fake_imgs
 
-    def load_networks(self, n_words, attr_enhance, device):
+    def load_networks(self, n_words, device):
 
         model_dir = cfg.TRAIN.NET_G[:cfg.TRAIN.NET_G.rfind('/')]
-        netG = NetG(cfg.TRAIN.NF, 100).to(device)
+        netG = Gen(cfg.TRAIN.GF, 100).to(device)
         netG = DataParallelWithCallback(netG)
         model_path = cfg.TRAIN.NET_G
         netG.load_state_dict(torch.load(model_path))
         netG.eval()
 
-        if attr_enhance:
-            st_idx = cfg.TRAIN.NET_G.rfind('_') + 1
-            ed_idx = cfg.TRAIN.NET_G.rfind('.')
+        st_idx = cfg.TRAIN.NET_G.rfind('_') + 1
+        ed_idx = cfg.TRAIN.NET_G.rfind('.')
             epoch = int(cfg.TRAIN.NET_G[st_idx:ed_idx])
             model_path = os.path.join(model_dir, "attr_enhance_%d.pth" % epoch)
 
@@ -214,9 +202,7 @@ class Sampling(object):
 
         return netG, text_encoder, attr_enhance, gen_one_batch
 
-    """
-    load text information and embeddings
-    """
+
     def load_attr_func(self):
         tokenizer = RegexpTokenizer(r'\w+')
 
@@ -641,8 +627,7 @@ if __name__ == "__main__":
     cfg.TRAIN.BATCH_SIZE = args.batch_size
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.GPU_ID
     if args.manualSeed is None:
-        args.manualSeed = 3407
-        # args.manualSeed = random.randint(1, 10000)
+        args.manualSeed = random.randint(1, 10000)
 
     random.seed(args.manualSeed)
     np.random.seed(args.manualSeed)
@@ -654,10 +639,17 @@ if __name__ == "__main__":
     if cfg.CUDA:
         torch.cuda.manual_seed_all(args.manualSeed)
 
-    print(args)
-    # step2. initialize the output file
-    visual_dir = os.path.join(cfg.SAVE_DIR, "visual_result")
+    # where to save
+    if args.debug:
+        output_dir = os.path.join(cfg.SAVE_DIR, args.debug_output_dir)
+    elif args.output_dir != '':
+        output_dir = os.path.join(cfg.SAVE_DIR, args.output_dir)
+    else:
+        # save in the model dir
+        last_idx = cfg.TRAIN.NET_G.rfind('Model') - 1
+        output_dir = cfg.TRAIN.NET_G[:last_idx]
 
+    print(args)
     cudnn.benchmark = True
-    sam = Sampling(visual_dir, args)
+    sam = Sampling(output_dir, args)
     sam.main()
