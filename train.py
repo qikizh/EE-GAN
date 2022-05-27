@@ -42,12 +42,16 @@ def parse_args():
     parser.add_argument('--gpu', dest='gpu_ids', type=str, default="0")
     parser.add_argument('--output_dir', dest='output_dir',
                         help='the path to save models and images',
-                        default='EE-GAN bird', type=str)
+                        default='../EE-GAN', type=str)
     parser.add_argument('--debug_output_dir', dest='debug_output_dir',
                         help='the path to save models and images in debug mode',
                         default='Debug', type=str)
     parser.add_argument('--debug', action="store_true", help='using debug mode')
     parser.add_argument('--manualSeed', type=int, help='manual seed', default=3407)
+    parser.add_argument('--batch_size', type=int, help='using batch size', default=32)
+    # for ablation study
+    parser.add_argument('--class_coe', type=float, help='using batch size', default=10)
+    parser.add_argument('--sim_coe', type=float, help='using batch size', default=0.05)
     args = parser.parse_args()
     return args
 
@@ -111,8 +115,8 @@ class Trainer(object):
 
         self.args = args
         self.debug = args.debug
-        self.disc_class = cfg.USE_CLASS
-        self.class_nums = cfg.CLASS_NUM
+        self.disc_class = cfg.TRAIN.USE_CLASS
+        self.class_nums = cfg.TRAIN.CLASS_NUM
 
         self.batch_size = cfg.TRAIN.BATCH_SIZE
         self.max_attr_nums = cfg.TEXT.MAX_ATTR_NUM
@@ -136,9 +140,10 @@ class Trainer(object):
         self.writer = SummaryWriter(writer_path)
 
         self.iters_cnt = 0
-        self.d_class_coe = 10
-        self.g_class_coe = 10
-        self.DAMSM_coe = 0.05
+        self.d_class_coe = self.g_class_coe = args.class_coe
+        self.DAMSM_coe = args.sim_coe
+
+        print("using class_coe: %f, DAMSM_coe: %f" % (self.g_class_coe, self.DAMSM_coe))
 
     def train(self):
 
@@ -199,6 +204,8 @@ class Trainer(object):
                 self.d_update(imgs, fake_imgs, sent_emb, unpair_sent_emb, class_labels, iter_rec)
                 self.g_update(fake_imgs, sent_emb, words_emb, attn_attr_emb, cls_ids, batch_size, match_labels,
                               cap_lens, class_labels, iter_rec)
+
+                # print("step")
 
             self.save_images(epoch)
             self.save_model(epoch)
@@ -276,11 +283,12 @@ class Trainer(object):
         """
         The fix text-image pair is provided during training
         """
-        [real_imgs, caps, cap_lens, _,
-         attrs, _, attrs_len, _, _, _, _] = prepare_data(next(iter(data_loader)), self.device)
+        [real_imgs, caps, cap_lens, cls_ids,
+         attrs, attr_nums, attrs_len, _, _, _, _] = prepare_data(next(iter(data_loader)), self.device)
+        # unpair_caps, unpair_cap_lens, unpair_cls_ids, keys
 
         txt_save_path = os.path.join(self.image_dir, 'sampling_text.txt')
-        save_text_results(caps, cap_lens, self.ixtoword, txt_save_path)
+        save_text_results(caps, cap_lens, self.ixtoword, txt_save_path, attrs, attr_nums, attrs_len)
         save_img_results(real_imgs,prefix='sample_image', image_dir=self.image_dir)
 
         with torch.no_grad():
@@ -422,7 +430,7 @@ class Trainer(object):
 
         # the part is considered later
         a_loss0, a_loss1 = sent_loss(cnn_code, attrs_emb, match_labels, class_ids, batch_size)
-        a_loss = (a_loss0 + a_loss1) * cfg.TRAIN.SMOOTH.LAMBDA * 0.5
+        a_loss = (a_loss0 + a_loss1) * cfg.TRAIN.SMOOTH.LAMBDA
 
         return w_loss, s_loss, a_loss
 

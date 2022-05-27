@@ -1,0 +1,11 @@
+usage: train.py [-h] [--cfg CFG_FILE] [--gpu GPU_IDS]
+                [--output_dir OUTPUT_DIR]
+                [--debug_output_dir DEBUG_OUTPUT_DIR] [--debug]
+                [--manualSeed MANUALSEED] [--batch_size BATCH_SIZE]
+train.py: error: unrecognized arguments: 
+usage: train.py [-h] [--cfg CFG_FILE] [--gpu GPU_IDS]
+                [--output_dir OUTPUT_DIR]
+                [--debug_output_dir DEBUG_OUTPUT_DIR] [--debug]
+                [--manualSeed MANUALSEED] [--batch_size BATCH_SIZE]
+train.py: error: unrecognized arguments: 
+python: can't open file '../train.py': [Errno 2] No such file or directory

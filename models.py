@@ -239,11 +239,11 @@ class Gen(nn.Module):
         # 64 x 64
         x_32 = out
         x_64, stage_mask = \
-            self.SARG_progress(x_32, [sent, attrs], stage_mask, 64, SAGB_block=self.blocks[4])
+            self.SAGB_progress(x_32, [sent, attrs], stage_mask, 64, SAGB_block=self.blocks[4])
         x_128, stage_mask = \
-            self.SARG_progress(x_64, [sent, attrs], stage_mask, 128, SAGB_block=self.blocks[5])
+            self.SAGB_progress(x_64, [sent, attrs], stage_mask, 128, SAGB_block=self.blocks[5])
         x_256, _ = \
-            self.SARG_progress(x_128, [sent, attrs], stage_mask, 256, SAGB_block=self.blocks[6])
+            self.SAGB_progress(x_128, [sent, attrs], stage_mask, 256, SAGB_block=self.blocks[6])
 
         cum_x_64 = self.cum_64(x_32, x_64)
         cum_x_128 = self.cum_128(cum_x_64, x_128)

@@ -44,17 +44,17 @@ def save_text_results(captions, cap_lens, ixtoword, txt_save_path,
         save_texts.append(sent_str)
 
         # attributes
-        att_str = "# "
-        # attrs_num[i] = 0, 1, 2, 3
+        if attrs is not None:
+            att_str = "# "
+            # attrs_num[i] = 0, 1, 2, 3
+            for attr_ix in range(attrs_num[i]):
+                one_attr_len = attrs_len[i][attr_ix]
+                one_attr = attrs[i][attr_ix].data.cpu().numpy()
+                words = [ixtoword[one_attr[j]].encode('ascii', 'ignore').decode('ascii')
+                        for j in range(one_attr_len)]
+                att_str += " ".join(words) + ", "
 
-        for attr_ix in range(attrs_num[i]):
-            one_attr_len = attrs_len[i][attr_ix]
-            one_attr = attrs[i][attr_ix].data.cpu().numpy()
-            words = [ixtoword[one_attr[j]].encode('ascii', 'ignore').decode('ascii')
-                     for j in range(one_attr_len)]
-            att_str += " ".join(words) + ", "
-
-        save_texts.append(att_str)
+            save_texts.append(att_str)
 
     f = open(txt_save_path, "w+")
     for one_line in save_texts:

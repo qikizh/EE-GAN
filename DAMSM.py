@@ -114,14 +114,10 @@ class RNN_ENCODER(nn.Module):
         sent_emb = sent_emb.view(-1, self.nhidden * self.num_directions)
         return words_emb, sent_emb
 
-
 class CNN_ENCODER(nn.Module):
     def __init__(self, nef, pre_trained=False):
         super(CNN_ENCODER, self).__init__()
-        if cfg.TRAIN.FLAG:
-            self.nef = nef
-        else:
-            self.nef = 256  # define a uniform ranker
+        self.nef = 256  # define a uniform ranker
 
         #model = models.inception_v3()
         #url = 'https://download.pytorch.org/models/inception_v3_google-1a9a5a14.pth'

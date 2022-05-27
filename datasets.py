@@ -216,7 +216,7 @@ class TextDataset(data.Dataset):
         if dataset_name == 'bird':
             self.bbox = self.load_bbox(data_dir)
 
-        self.class_id = self.load_class_id(data_dir, len(self.filenames))
+        self.class_id = self.load_class_id(data_dir, split, len(self.filenames))
         self.number_example = len(self.filenames)
 
         if self.use_attr:
@@ -284,8 +284,8 @@ class TextDataset(data.Dataset):
         return captions, ixtoword, wordtoix, n_words
 
     @staticmethod
-    def load_class_id(data_dir, total_num):
-        class_path = os.path.join(data_dir, "class_info.pickle")
+    def load_class_id(data_dir, split, total_num):
+        class_path = os.path.join(data_dir, split, "class_info.pickle")
         if os.path.isfile(class_path):
             with open(class_path, 'rb') as f:
                 class_id = pickle.load(f, encoding="bytes")
