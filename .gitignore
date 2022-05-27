@@ -1,3 +1,4 @@
 .idea
 .vscode
-out_info
+/out_info
+/func_test
