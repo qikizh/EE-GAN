@@ -1,5 +1,5 @@
 .idea
 .vscode
-/out_info/#
-/func_test/
-/__pycache__/#
+out_info/
+func_test/
+__pycache__/
